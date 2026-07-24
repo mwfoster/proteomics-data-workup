@@ -5,10 +5,11 @@ default_user_lib <- file.path(path.expand("~"), "R", "library", r_version_lib)
 user_lib <- Sys.getenv("R_LIBS_USER", unset = "")
 if (!nzchar(user_lib) || normalizePath(user_lib, mustWork = FALSE) == normalizePath(file.path(path.expand("~"), "R", "library"), mustWork = FALSE)) {
   user_lib <- default_user_lib
-  Sys.setenv(R_LIBS_USER = user_lib)
 }
 dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
 base_lib <- file.path(R.home(), "library")
+Sys.setenv(R_LIBS_USER = user_lib, R_LIBS_SITE = "", R_LIBS = user_lib)
+try(assign(".Library.site", character(0), envir = baseenv()), silent = TRUE)
 .libPaths(unique(c(user_lib, base_lib)))
 
 message("R version: ", R.version.string)
@@ -75,10 +76,15 @@ install_one <- function(package, min_version = NULL, repos = getOption("repos"))
 
 cran_requirements <- c(
   cli = "",
+  fansi = "",
+  utf8 = "",
   rlang = "",
   vctrs = "",
   lifecycle = "",
   glue = "",
+  pillar = "",
+  tibble = "",
+  pkgconfig = "",
   shiny = "",
   ggplot2 = "",
   DT = "",
@@ -119,7 +125,7 @@ if (package_ok("BiocManager") && !package_ok("fgsea")) {
   )
 }
 
-required_packages <- setdiff(names(cran_requirements), c("cli", "rlang", "vctrs", "lifecycle", "glue"))
+required_packages <- setdiff(names(cran_requirements), c("cli", "fansi", "utf8", "rlang", "vctrs", "lifecycle", "glue", "pillar", "tibble", "pkgconfig"))
 still_missing <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
 if (length(still_missing) > 0) {
   stop("These packages are still missing: ", paste(still_missing, collapse = ", "), call. = FALSE)
