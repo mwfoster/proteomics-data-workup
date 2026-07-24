@@ -2,9 +2,10 @@ r_version_lib <- paste(R.version$major, sub("\\..*", "", R.version$minor), sep =
 user_lib <- Sys.getenv("R_LIBS_USER", unset = "")
 if (!nzchar(user_lib) || normalizePath(user_lib, mustWork = FALSE) == normalizePath(file.path(path.expand("~"), "R", "library"), mustWork = FALSE)) {
   user_lib <- file.path(path.expand("~"), "R", "library", r_version_lib)
-  Sys.setenv(R_LIBS_USER = user_lib)
 }
 dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+Sys.setenv(R_LIBS_USER = user_lib, R_LIBS_SITE = "", R_LIBS = user_lib)
+try(assign(".Library.site", character(0), envir = baseenv()), silent = TRUE)
 .libPaths(unique(c(user_lib, file.path(R.home(), "library"))))
 
 args <- commandArgs(trailingOnly = FALSE)
