@@ -1,3 +1,5 @@
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
 user_lib <- Sys.getenv("R_LIBS_USER", unset = "")
 if (!nzchar(user_lib)) {
   user_lib <- file.path(path.expand("~"), "R", "library")
@@ -5,6 +7,11 @@ if (!nzchar(user_lib)) {
 }
 dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
 .libPaths(unique(c(user_lib, .libPaths())))
+
+message("R version: ", R.version.string)
+message("R executable: ", file.path(R.home("bin"), "R"))
+message("User library: ", user_lib)
+message("Library paths:\n  ", paste(.libPaths(), collapse = "\n  "))
 
 if (.Platform$OS.type != "windows") {
   r_dir <- file.path(path.expand("~"), ".R")
@@ -32,18 +39,34 @@ package_ok <- function(package, min_version = NULL) {
   TRUE
 }
 
-install_if_needed <- function(requirements, repos = "https://cloud.r-project.org") {
-  needed <- names(requirements)[!vapply(names(requirements), function(package) {
-    min_version <- requirements[[package]]
-    package_ok(package, if (nzchar(min_version)) min_version else NULL)
-  }, logical(1))]
-  if (length(needed) > 0) {
-    install.packages(
-      needed,
-      repos = repos,
-      dependencies = c("Depends", "Imports", "LinkingTo")
-    )
+install_one <- function(package, min_version = NULL, repos = getOption("repos")) {
+  if (package_ok(package, min_version)) {
+    message("OK: ", package, " ", as.character(utils::packageVersion(package)))
+    return(TRUE)
   }
+
+  version_note <- if (!is.null(min_version)) paste0(" >= ", min_version) else ""
+  message("Installing: ", package, version_note)
+  tryCatch(
+    {
+      install.packages(
+        package,
+        repos = repos,
+        dependencies = c("Depends", "Imports", "LinkingTo")
+      )
+      if (package_ok(package, min_version)) {
+        message("Installed: ", package, " ", as.character(utils::packageVersion(package)))
+        TRUE
+      } else {
+        warning("Package installed command returned, but package is still unavailable or too old: ", package, call. = FALSE)
+        FALSE
+      }
+    },
+    error = function(e) {
+      warning("Failed to install ", package, ": ", conditionMessage(e), call. = FALSE)
+      FALSE
+    }
+  )
 }
 
 cran_requirements <- c(
@@ -65,11 +88,15 @@ cran_requirements <- c(
   BiocManager = ""
 )
 
-install_if_needed(cran_requirements)
+for (package in names(cran_requirements)) {
+  min_version <- cran_requirements[[package]]
+  install_one(package, if (nzchar(min_version)) min_version else NULL)
+}
 
-if (!package_ok("fgsea")) {
+if (package_ok("BiocManager") && !package_ok("fgsea")) {
   tryCatch(
     {
+      message("Installing optional Bioconductor package: fgsea")
       BiocManager::install("fgsea", ask = FALSE, update = FALSE)
     },
     error = function(e) {
