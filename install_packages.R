@@ -68,14 +68,22 @@ cran_requirements <- c(
 install_if_needed(cran_requirements)
 
 if (!package_ok("fgsea")) {
-  bioc_args <- list(pkgs = "fgsea", ask = FALSE, update = FALSE)
-  if (getRversion() >= "4.6.0") {
-    bioc_args$version <- "3.23"
-  }
-  do.call(BiocManager::install, bioc_args)
+  tryCatch(
+    {
+      BiocManager::install("fgsea", ask = FALSE, update = FALSE)
+    },
+    error = function(e) {
+      warning(
+        "Optional package 'fgsea' could not be installed. The app will still run, ",
+        "but the GSEA tab will require fgsea. Details: ",
+        conditionMessage(e),
+        call. = FALSE
+      )
+    }
+  )
 }
 
-required_packages <- c(names(cran_requirements), "fgsea")
+required_packages <- names(cran_requirements)
 still_missing <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
 if (length(still_missing) > 0) {
   stop("These packages are still missing: ", paste(still_missing, collapse = ", "), call. = FALSE)
