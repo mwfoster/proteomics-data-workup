@@ -44,7 +44,8 @@ package_in_user_lib <- function(package) {
 
 managed_packages <- c(
   "Rcpp", "cli", "fansi", "utf8", "rlang", "vctrs", "lifecycle", "glue",
-  "pillar", "tibble", "pkgconfig", "purrr", "tidyselect", "generics", "magrittr",
+  "pillar", "tibble", "pkgconfig", "purrr", "tidyr", "tidyselect", "generics",
+  "magrittr", "stringi", "withr", "R6", "curl", "mime", "openssl", "httr",
   "data.table", "htmltools", "textshaping", "systemfonts", "cpp11", "bslib",
   "jquerylib", "sass", "fontawesome", "htmlwidgets", "shiny", "ggplot2", "DT",
   "dplyr", "stringr", "missMDA", "FactoMineR", "svglite", "openxlsx",
@@ -112,9 +113,17 @@ cran_requirements <- c(
   tibble = "3.3.0",
   pkgconfig = "2.0.3",
   purrr = "1.1.0",
+  tidyr = "1.3.1",
   tidyselect = "1.2.1",
   generics = "0.1.4",
   magrittr = "2.0.4",
+  stringi = "1.8.7",
+  withr = "3.0.2",
+  R6 = "2.6.1",
+  curl = "7.0.0",
+  mime = "0.13",
+  openssl = "2.3.3",
+  httr = "1.4.7",
   data.table = "1.17.8",
   htmltools = "0.5.8",
   textshaping = "1.0.3",
@@ -164,7 +173,7 @@ if (package_ok("BiocManager") && !package_ok("fgsea")) {
   )
 }
 
-required_packages <- setdiff(names(cran_requirements), c("Rcpp", "cli", "fansi", "utf8", "rlang", "vctrs", "lifecycle", "glue", "pillar", "tibble", "pkgconfig", "purrr", "tidyselect", "generics", "magrittr", "data.table", "htmltools", "textshaping", "systemfonts", "cpp11", "bslib", "jquerylib", "sass", "fontawesome"))
+required_packages <- setdiff(names(cran_requirements), c("Rcpp", "cli", "fansi", "utf8", "rlang", "vctrs", "lifecycle", "glue", "pillar", "tibble", "pkgconfig", "purrr", "tidyr", "tidyselect", "generics", "magrittr", "stringi", "withr", "R6", "curl", "mime", "openssl", "httr", "data.table", "htmltools", "textshaping", "systemfonts", "cpp11", "bslib", "jquerylib", "sass", "fontawesome"))
 still_missing <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
 if (length(still_missing) > 0) {
   stop("These packages are still missing: ", paste(still_missing, collapse = ", "), call. = FALSE)
