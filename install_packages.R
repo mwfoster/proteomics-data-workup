@@ -1,12 +1,14 @@
 options(repos = c(CRAN = "https://cloud.r-project.org"))
 
+r_version_lib <- paste(R.version$major, sub("\\..*", "", R.version$minor), sep = ".")
+default_user_lib <- file.path(path.expand("~"), "R", "library", r_version_lib)
 user_lib <- Sys.getenv("R_LIBS_USER", unset = "")
-if (!nzchar(user_lib)) {
-  user_lib <- file.path(path.expand("~"), "R", "library")
+if (!nzchar(user_lib) || normalizePath(user_lib, mustWork = FALSE) == normalizePath(file.path(path.expand("~"), "R", "library"), mustWork = FALSE)) {
+  user_lib <- default_user_lib
   Sys.setenv(R_LIBS_USER = user_lib)
 }
 dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
-.libPaths(unique(c(user_lib, .libPaths())))
+.libPaths(unique(c(user_lib, setdiff(.libPaths(), file.path(path.expand("~"), "R", "library")))))
 
 message("R version: ", R.version.string)
 message("R executable: ", file.path(R.home("bin"), "R"))
