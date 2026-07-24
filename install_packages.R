@@ -75,16 +75,22 @@ install_one <- function(package, min_version = NULL, repos = getOption("repos"))
 }
 
 cran_requirements <- c(
-  cli = "",
-  fansi = "",
-  utf8 = "",
-  rlang = "",
-  vctrs = "",
-  lifecycle = "",
-  glue = "",
-  pillar = "",
-  tibble = "",
-  pkgconfig = "",
+  Rcpp = "1.1.0",
+  cli = "3.6.5",
+  fansi = "1.0.6",
+  utf8 = "1.2.6",
+  rlang = "1.1.6",
+  vctrs = "0.6.5",
+  lifecycle = "1.0.4",
+  glue = "1.8.0",
+  pillar = "1.11.0",
+  tibble = "3.3.0",
+  pkgconfig = "2.0.3",
+  data.table = "1.17.8",
+  htmltools = "0.5.8",
+  textshaping = "1.0.3",
+  systemfonts = "1.2.3",
+  cpp11 = "0.5.2",
   shiny = "",
   ggplot2 = "",
   DT = "",
@@ -125,7 +131,7 @@ if (package_ok("BiocManager") && !package_ok("fgsea")) {
   )
 }
 
-required_packages <- setdiff(names(cran_requirements), c("cli", "fansi", "utf8", "rlang", "vctrs", "lifecycle", "glue", "pillar", "tibble", "pkgconfig"))
+required_packages <- setdiff(names(cran_requirements), c("Rcpp", "cli", "fansi", "utf8", "rlang", "vctrs", "lifecycle", "glue", "pillar", "tibble", "pkgconfig", "data.table", "htmltools", "textshaping", "systemfonts", "cpp11"))
 still_missing <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
 if (length(still_missing) > 0) {
   stop("These packages are still missing: ", paste(still_missing, collapse = ", "), call. = FALSE)
