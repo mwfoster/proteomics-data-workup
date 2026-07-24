@@ -52,31 +52,32 @@ managed_packages <- c(
   "plotly", "msigdbr", "BiocManager"
 )
 
-package_ok <- function(package, min_version = NULL) {
+package_problem <- function(package, min_version = NULL) {
   if (!requireNamespace(package, quietly = TRUE)) {
-    return(FALSE)
+    return("not available")
   }
   if (package %in% managed_packages && !package_in_user_lib(package)) {
-    return(FALSE)
+    return("available only outside clean user library")
   }
   if (!is.null(min_version) && utils::packageVersion(package) < package_version(min_version)) {
-    return(FALSE)
+    return(paste0("version ", as.character(utils::packageVersion(package)), " < ", min_version))
   }
-  TRUE
+  NULL
+}
+
+package_ok <- function(package, min_version = NULL) {
+  is.null(package_problem(package, min_version))
 }
 
 install_one <- function(package, min_version = NULL, repos = getOption("repos")) {
-  if (package_ok(package, min_version)) {
+  problem <- package_problem(package, min_version)
+  if (is.null(problem)) {
     message("OK: ", package, " ", as.character(utils::packageVersion(package)), " [", find.package(package)[1], "]")
     return(TRUE)
   }
 
   version_note <- if (!is.null(min_version)) paste0(" >= ", min_version) else ""
-  if (package %in% managed_packages) {
-    message("Installing clean user-library copy: ", package, version_note)
-  } else {
-    message("Installing: ", package, version_note)
-  }
+  message("Installing clean user-library copy: ", package, version_note, " (", problem, ")")
   tryCatch(
     {
       install.packages(
@@ -85,11 +86,12 @@ install_one <- function(package, min_version = NULL, repos = getOption("repos"))
         repos = repos,
         dependencies = c("Depends", "Imports", "LinkingTo")
       )
-      if (package_ok(package, min_version)) {
+      problem_after <- package_problem(package, min_version)
+      if (is.null(problem_after)) {
         message("Installed: ", package, " ", as.character(utils::packageVersion(package)), " [", find.package(package)[1], "]")
         TRUE
       } else {
-        warning("Package installed command returned, but package is still unavailable, too old, or outside user library: ", package, call. = FALSE)
+        warning("Package installed command returned, but ", package, " is still not usable: ", problem_after, call. = FALSE)
         FALSE
       }
     },
@@ -101,38 +103,38 @@ install_one <- function(package, min_version = NULL, repos = getOption("repos"))
 }
 
 cran_requirements <- c(
-  Rcpp = "1.1.0",
-  cli = "3.6.5",
-  fansi = "1.0.6",
-  utf8 = "1.2.6",
-  rlang = "1.1.6",
-  vctrs = "0.6.5",
-  lifecycle = "1.0.4",
-  glue = "1.8.0",
-  pillar = "1.11.0",
-  tibble = "3.3.0",
-  pkgconfig = "2.0.3",
-  purrr = "1.1.0",
-  tidyr = "1.3.1",
-  tidyselect = "1.2.1",
-  generics = "0.1.4",
-  magrittr = "2.0.4",
-  stringi = "1.8.7",
-  withr = "3.0.2",
-  R6 = "2.6.1",
-  curl = "7.0.0",
-  mime = "0.13",
-  openssl = "2.3.3",
-  httr = "1.4.7",
-  data.table = "1.17.8",
-  htmltools = "0.5.8",
-  textshaping = "1.0.3",
-  systemfonts = "1.2.3",
-  cpp11 = "0.5.2",
-  bslib = "0.9.0",
-  jquerylib = "0.1.4",
-  sass = "0.4.10",
-  fontawesome = "0.5.3",
+  Rcpp = "",
+  cli = "",
+  fansi = "",
+  utf8 = "",
+  rlang = "",
+  vctrs = "",
+  lifecycle = "",
+  glue = "",
+  pillar = "",
+  tibble = "",
+  pkgconfig = "",
+  purrr = "",
+  tidyr = "",
+  tidyselect = "",
+  generics = "",
+  magrittr = "",
+  stringi = "",
+  withr = "",
+  R6 = "",
+  curl = "",
+  mime = "",
+  openssl = "",
+  httr = "",
+  data.table = "",
+  htmltools = "",
+  textshaping = "",
+  systemfonts = "",
+  cpp11 = "",
+  bslib = "",
+  jquerylib = "",
+  sass = "",
+  fontawesome = "",
   shiny = "",
   ggplot2 = "",
   DT = "",
