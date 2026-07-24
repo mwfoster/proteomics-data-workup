@@ -46,7 +46,7 @@ managed_packages <- c(
   "Rcpp", "cli", "fansi", "utf8", "rlang", "vctrs", "lifecycle", "glue",
   "pillar", "tibble", "pkgconfig", "purrr", "tidyr", "tidyselect", "generics",
   "magrittr", "stringi", "withr", "R6", "curl", "mime", "openssl", "httr",
-  "data.table", "htmltools", "textshaping", "systemfonts", "cpp11", "bslib",
+  "yaml", "data.table", "htmltools", "textshaping", "systemfonts", "cpp11", "bslib",
   "jquerylib", "sass", "fontawesome", "htmlwidgets", "shiny", "ggplot2", "DT",
   "dplyr", "stringr", "missMDA", "FactoMineR", "svglite", "openxlsx",
   "plotly", "msigdbr", "BiocManager"
@@ -126,6 +126,7 @@ cran_requirements <- c(
   mime = "",
   openssl = "",
   httr = "",
+  yaml = "",
   data.table = "",
   htmltools = "",
   textshaping = "",
@@ -175,7 +176,7 @@ if (package_ok("BiocManager") && !package_ok("fgsea")) {
   )
 }
 
-required_packages <- setdiff(names(cran_requirements), c("Rcpp", "cli", "fansi", "utf8", "rlang", "vctrs", "lifecycle", "glue", "pillar", "tibble", "pkgconfig", "purrr", "tidyr", "tidyselect", "generics", "magrittr", "stringi", "withr", "R6", "curl", "mime", "openssl", "httr", "data.table", "htmltools", "textshaping", "systemfonts", "cpp11", "bslib", "jquerylib", "sass", "fontawesome"))
+required_packages <- setdiff(names(cran_requirements), c("Rcpp", "cli", "fansi", "utf8", "rlang", "vctrs", "lifecycle", "glue", "pillar", "tibble", "pkgconfig", "purrr", "tidyr", "tidyselect", "generics", "magrittr", "stringi", "withr", "R6", "curl", "mime", "openssl", "httr", "yaml", "data.table", "htmltools", "textshaping", "systemfonts", "cpp11", "bslib", "jquerylib", "sass", "fontawesome"))
 still_missing <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
 if (length(still_missing) > 0) {
   stop("These packages are still missing: ", paste(still_missing, collapse = ", "), call. = FALSE)
