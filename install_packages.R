@@ -33,11 +33,6 @@ if (.Platform$OS.type != "windows") {
   }
 }
 
-compiled_packages <- c(
-  "Rcpp", "cli", "fansi", "utf8", "rlang", "vctrs", "data.table",
-  "htmltools", "textshaping", "systemfonts", "cpp11"
-)
-
 package_in_user_lib <- function(package) {
   locations <- tryCatch(find.package(package, quiet = TRUE), error = function(e) character())
   if (length(locations) == 0) {
@@ -47,11 +42,20 @@ package_in_user_lib <- function(package) {
   any(startsWith(normalizePath(locations, mustWork = FALSE), user_lib_norm))
 }
 
+managed_packages <- c(
+  "Rcpp", "cli", "fansi", "utf8", "rlang", "vctrs", "lifecycle", "glue",
+  "pillar", "tibble", "pkgconfig", "purrr", "tidyselect", "generics", "magrittr",
+  "data.table", "htmltools", "textshaping", "systemfonts", "cpp11", "bslib",
+  "jquerylib", "sass", "fontawesome", "htmlwidgets", "shiny", "ggplot2", "DT",
+  "dplyr", "stringr", "missMDA", "FactoMineR", "svglite", "openxlsx",
+  "plotly", "msigdbr", "BiocManager"
+)
+
 package_ok <- function(package, min_version = NULL) {
   if (!requireNamespace(package, quietly = TRUE)) {
     return(FALSE)
   }
-  if (package %in% compiled_packages && !package_in_user_lib(package)) {
+  if (package %in% managed_packages && !package_in_user_lib(package)) {
     return(FALSE)
   }
   if (!is.null(min_version) && utils::packageVersion(package) < package_version(min_version)) {
@@ -67,7 +71,7 @@ install_one <- function(package, min_version = NULL, repos = getOption("repos"))
   }
 
   version_note <- if (!is.null(min_version)) paste0(" >= ", min_version) else ""
-  if (package %in% compiled_packages) {
+  if (package %in% managed_packages) {
     message("Installing clean user-library copy: ", package, version_note)
   } else {
     message("Installing: ", package, version_note)
@@ -107,11 +111,19 @@ cran_requirements <- c(
   pillar = "1.11.0",
   tibble = "3.3.0",
   pkgconfig = "2.0.3",
+  purrr = "1.1.0",
+  tidyselect = "1.2.1",
+  generics = "0.1.4",
+  magrittr = "2.0.4",
   data.table = "1.17.8",
   htmltools = "0.5.8",
   textshaping = "1.0.3",
   systemfonts = "1.2.3",
   cpp11 = "0.5.2",
+  bslib = "0.9.0",
+  jquerylib = "0.1.4",
+  sass = "0.4.10",
+  fontawesome = "0.5.3",
   shiny = "",
   ggplot2 = "",
   DT = "",
@@ -152,15 +164,15 @@ if (package_ok("BiocManager") && !package_ok("fgsea")) {
   )
 }
 
-required_packages <- setdiff(names(cran_requirements), compiled_packages)
+required_packages <- setdiff(names(cran_requirements), c("Rcpp", "cli", "fansi", "utf8", "rlang", "vctrs", "lifecycle", "glue", "pillar", "tibble", "pkgconfig", "purrr", "tidyselect", "generics", "magrittr", "data.table", "htmltools", "textshaping", "systemfonts", "cpp11", "bslib", "jquerylib", "sass", "fontawesome"))
 still_missing <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
 if (length(still_missing) > 0) {
   stop("These packages are still missing: ", paste(still_missing, collapse = ", "), call. = FALSE)
 }
 
-compiled_missing <- compiled_packages[!vapply(compiled_packages, package_in_user_lib, logical(1))]
-if (length(compiled_missing) > 0) {
-  stop("These compiled packages are still not installed in the clean user library: ", paste(compiled_missing, collapse = ", "), call. = FALSE)
+managed_missing <- managed_packages[!vapply(managed_packages, package_in_user_lib, logical(1))]
+if (length(managed_missing) > 0) {
+  stop("These packages are still not installed in the clean user library: ", paste(managed_missing, collapse = ", "), call. = FALSE)
 }
 
 if (utils::packageVersion("FactoMineR") < package_version("2.16")) {
