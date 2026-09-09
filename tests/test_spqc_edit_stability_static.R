@@ -1,0 +1,18 @@
+text <- paste(readLines(if (file.exists("app.R")) "app.R" else "../app.R", warn = FALSE), collapse = "\n")
+stopifnot(grepl('stateSave = TRUE', text, fixed = TRUE))
+stopifnot(grepl('actionButton("apply_metadata_changes", "Apply metadata changes", class = "btn-primary")', text, fixed = TRUE))
+stopifnot(grepl('textOutput("metadata_apply_status")', text, fixed = TRUE))
+stopifnot(grepl('spqc_metadata_draft_edits <- reactiveVal(', text, fixed = TRUE))
+stopifnot(grepl('draft_edits <- isolate(spqc_metadata_draft_edits())', text, fixed = TRUE))
+stopifnot(grepl('observeEvent(input$apply_metadata_changes, {', text, fixed = TRUE))
+stopifnot(grepl('spqc_metadata_edits(candidate$spqc_metadata_edits)', text, fixed = TRUE))
+stopifnot(grepl('spqc_metadata_draft_edits(empty_spqc_metadata_edits())', text, fixed = TRUE))
+edit_start <- regexpr("observeEvent(input$metadata_preview_cell_edit", text, fixed = TRUE)[1L]
+apply_start <- regexpr("observeEvent(input$apply_metadata_changes", text, fixed = TRUE)[1L]
+stopifnot(edit_start > 0L, apply_start > edit_start)
+edit_block <- substr(text, edit_start, apply_start - 1L)
+stopifnot(grepl("spqc_metadata_draft_edits(draft_edits)", edit_block, fixed = TRUE))
+stopifnot(!grepl("replaceData(", edit_block, fixed = TRUE))
+stopifnot(!grepl("spqc_metadata_edits(", edit_block, fixed = TRUE))
+stopifnot(grepl('selectizeInput(\n            "stats_group_columns"', text, fixed = TRUE))
+cat("Metadata edit stability and multi-column statistics UI checks OK\n")

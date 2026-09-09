@@ -1,0 +1,8 @@
+install <- paste(readLines(if (file.exists("install_packages.R")) "install_packages.R" else "../install_packages.R", warn = FALSE), collapse = "\n")
+readme <- paste(readLines(if (file.exists("README.md")) "README.md" else "../README.md", warn = FALSE), collapse = "\n")
+ignore <- paste(readLines(if (file.exists(".gitignore")) ".gitignore" else "../.gitignore", warn = FALSE), collapse = "\n")
+for (package in c("DBI", "duckdb", "jsonlite")) stopifnot(grepl(package, install, fixed = TRUE))
+stopifnot(!grepl("RSQLite", install, fixed = TRUE))
+for (pattern in c("*.duckdb", "*.db", "*.rds", "*.sqlite", ".RData", ".Rhistory")) stopifnot(grepl(pattern, ignore, fixed = TRUE))
+for (term in c("DuckDB", "RDS", "autosave", "SQLite")) stopifnot(grepl(term, readme, ignore.case = TRUE))
+message("Project packaging static checks passed.")

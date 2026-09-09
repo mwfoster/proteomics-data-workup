@@ -1,58 +1,94 @@
 # Proteomics Data Workup
 
-A Shiny app for proteomics data workup, including metadata construction, protein supplementary table export, batch correction, PCA, CV plots, volcano plots, feature plots, boxplots, correlation analysis, and run-identification summaries.
+## Active DuckDB/RDS projects
 
-## Repository Layout
+The current app uses DuckDB project files (`.duckdb` or `.db`) as its primary save format. Enter an active project path in the **Make metadata** tab to create or reopen a project, save immediately, or enable debounced autosave. A `.rds` path uses the matching RDS fallback when DuckDB is unavailable.
 
-- `app.R` - main Shiny app.
-- `run_app.R` - local launcher for development/testing.
-- `install_packages.R` - installs required R packages.
-- `.gitignore` - excludes uploaded study data, generated exports, R session state, and local caches.
-- `docs/ubuntu-shiny-server.md` - Ubuntu VM deployment notes.
+Projects retain metadata, editable SPQC assignments, processed protein tables, batch-corrected results, statistics, and selections across tabs. Replacing one metadata source preserves metadata-independent protein processing while invalidating sample mapping, batch correction, and statistics that need to be recalculated.
 
-## Local Quick Start
+Project ZIP exports include uploaded source files and, when DuckDB is installed, an embedded `project_cache.duckdb`. Legacy SQLite project catalogs are left untouched and are not silently converted; use the earlier app version if one must be reopened.
 
-Install R, then from the repository root run:
+This folder contains a portable Shiny app for building proteomics supplementary tables, metadata, PCA plots, CV plots, volcano plots, feature-level views, box plots, and run-identification summaries.
+
+## Files in this folder
+
+- `app.R` - the Shiny app.
+- `run_app.R` - launches the app from this folder.
+- `install_packages.R` - installs the R packages used by the app.
+- `README.md` - this guide.
+
+## Quick Start
+
+1. Install R if needed.
+2. Open R or RStudio.
+3. Set the working directory to this folder.
+4. Run:
 
 ```r
 source("install_packages.R")
-source("run_app.R")
-```
-
-Or directly:
-
-```r
 shiny::runApp(".", launch.browser = TRUE)
 ```
 
-## Main Features
+You can also run:
 
-- Build metadata from condition setup, run order, and sample-detail files.
-- Export supplementary Excel workbooks with metadata and protein tables.
-- Rename protein report headers using metadata-derived labels.
-- Calculate CVs and basic protein statistics, including paired comparisons when replicate pairing is valid.
-- Apply optional S3 batch correction using metadata-defined batch and biological group columns.
-- Create CV plots, PCA plots, PCA loading summaries, volcano plots, feature plots, boxplots, and correlation lollipop plots.
-- Explore protein-to-protein correlation/regression results with optional within-group filtering.
-- Save and reopen project ZIP bundles containing uploaded data and app settings.
+```r
+source("run_app.R")
+```
 
-## Data Handling
+## Required R Packages
 
-Do not commit uploaded study files, exported workbooks, project ZIP bundles, raw proteomics reports, or PHI/sensitive data to this repository. Use the app's project ZIP export only for approved sharing.
+The app uses:
 
-## Ubuntu VM Hosting
+- `shiny`
+- `ggplot2`
+- `DT`
+- `dplyr`
+- `stringr`
+- `missMDA`
+- `FactoMineR`
+- `svglite`
+- `readxl`
+- `openxlsx`
+- `jsonlite`
+- `zip`
+- `plotly`
+- `htmlwidgets`
+- `msigdbr`
+- `BiocManager`
 
-Recommended VM baseline for larger proteomics tables:
+If packages are missing, run:
 
-- Ubuntu 24.04 LTS
-- 4 CPU
-- 40 GB RAM
-- 200 GB disk
+```r
+source("install_packages.R")
+```
 
-See `docs/ubuntu-shiny-server.md` for a basic deployment path using Shiny Server.
+## Typical Inputs
+
+The app lets you choose files from any location on your computer. Common inputs include:
+
+- Condition setup TSV
+- Run-order TSV
+- Order sample-details workbook (`.xlsx`)
+- Protein group report without imputation
+- Protein group report with imputation
+- CV distribution table, or protein reports for calculating CVs
+- Identification overview TSV
+- Run identifications TSV for precursors
+- Run identifications TSV for protein groups
+
+## Sharing Data With Another User
+
+Inside the app, use the project ZIP export option on the `Make metadata` tab if you want to share the uploaded data files and app settings with another person. The recipient can open that ZIP from the same tab.
+
+For privacy, this share folder does not include project data files by default. Add data files manually only if they are approved for sharing.
 
 ## Notes
 
-- Excel export requires `openxlsx`.
+- Excel workbook export requires `openxlsx`.
 - Interactive volcano export requires `plotly`, `htmlwidgets`, and `zip`.
-- The app sets Shiny's max upload size to 1 GB in `app.R`.
+- Missing values are exported as `NaN` where supported.
+- Protein table sample measurement headers can be renamed from one or more metadata variables. Selected variables are joined with underscores, such as `Condition_SampleName` or `Condition_Replicate`.
+- Protein tables can be exported directly from their preview area as CSV files. CV columns can be placed before or after statistics columns.
+- The `Batch correction` tab uses optional `HarmonizR` / ComBat correction and defaults to the imputed protein table (`Table S3`).
+- The `Make condition setup` tab can build a condition setup file from a sample-details workbook and an optional existing condition setup template.
+- If sample detail names include embedded replicate numbers such as `CKD_01`, `CKD-02`, or `Control 3`, the app strips the replicate number from the condition/label and writes the number into the `Replicate` column.

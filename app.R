@@ -10,6 +10,26 @@ library(svglite)
 
 options(shiny.maxRequestSize = 1024 * 1024 * 1024)
 
+project_duckdb_file <- c(file.path(getwd(), "project_duckdb.R"), file.path(dirname(normalizePath("app.R", mustWork = FALSE)), "project_duckdb.R"))
+project_duckdb_file <- project_duckdb_file[file.exists(project_duckdb_file)][1]
+if (!is.na(project_duckdb_file)) source(project_duckdb_file)
+
+metadata_state_file <- c(
+  file.path(getwd(), "metadata_state.R"),
+  file.path(dirname(normalizePath("app.R", mustWork = FALSE)), "metadata_state.R")
+)
+metadata_state_file <- metadata_state_file[file.exists(metadata_state_file)][1]
+if (!is.na(metadata_state_file)) source(metadata_state_file)
+project_rds_file <- c(file.path(getwd(), "project_rds.R"), file.path(dirname(normalizePath("app.R", mustWork = FALSE)), "project_rds.R"))
+project_rds_file <- project_rds_file[file.exists(project_rds_file)][1]
+if (!is.na(project_rds_file)) source(project_rds_file)
+selection_helpers_file <- c(file.path(getwd(), "selection_helpers.R"), file.path(dirname(normalizePath("app.R", mustWork = FALSE)), "selection_helpers.R"))
+selection_helpers_file <- selection_helpers_file[file.exists(selection_helpers_file)][1]
+if (!is.na(selection_helpers_file)) source(selection_helpers_file)
+imputation_helpers_file <- c(file.path(getwd(), "imputation_helpers.R"), file.path(dirname(normalizePath("app.R", mustWork = FALSE)), "imputation_helpers.R"))
+imputation_helpers_file <- imputation_helpers_file[file.exists(imputation_helpers_file)][1]
+if (!is.na(imputation_helpers_file)) source(imputation_helpers_file)
+
 condition_replicate_label <- function(condition, replicate, fallback) {
   condition <- trimws(as.character(condition))
   replicate <- trimws(as.character(replicate))
@@ -28,6 +48,77 @@ parse_sample_exclusion_text <- function(text) {
   unique(values)
 }
 
+normalize_pca_missing_values <- function(matrix_data) {
+  matrix_data <- as.matrix(matrix_data)
+  matrix_data[!is.finite(matrix_data)] <- NA_real_
+  matrix_data
+}
+
+subset_pca_samples <- function(expression, metadata, metadata_column = "", included_values = character(0)) {
+  expression <- as.matrix(expression)
+  sample_ids <- rownames(expression)
+  if (is.null(sample_ids)) stop("PCA expression matrix requires sample row names.", call. = FALSE)
+  metadata <- as.data.frame(metadata, stringsAsFactors = FALSE, check.names = FALSE)
+  if (!"Sample" %in% colnames(metadata)) stop("PCA metadata requires a Sample column.", call. = FALSE)
+  metadata <- metadata[match(sample_ids, as.character(metadata$Sample)), , drop = FALSE]
+  metadata$Sample <- sample_ids
+
+  included_values <- trimws(as.character(included_values))
+  included_values <- unique(included_values[!is.na(included_values) & nzchar(included_values)])
+  use_filter <- length(metadata_column) == 1L && nzchar(metadata_column) &&
+    metadata_column %in% colnames(metadata) && length(included_values) > 0L
+  keep <- if (use_filter) {
+    values <- trimws(as.character(metadata[[metadata_column]]))
+    !is.na(values) & values %in% included_values
+  } else {
+    rep(TRUE, length(sample_ids))
+  }
+
+  list(
+    expression = expression[keep, , drop = FALSE],
+    metadata = metadata[keep, , drop = FALSE],
+    excluded_samples = as.integer(sum(!keep))
+  )
+}
+
+project_input_table <- function(file_info, cached_table = NULL) {
+  if (is.null(file_info)) return(cached_table)
+  value <- function(name) {
+    item <- file_info[[name]]
+    if (is.null(item) || !length(item)) "" else as.character(item[[1L]])
+  }
+  datapath <- value("datapath")
+  filename <- value("name")
+  if (!nzchar(datapath) || !file.exists(datapath)) stop("The selected table file is not available.", call. = FALSE)
+  ext <- tolower(tools::file_ext(filename))
+  sep <- if (ext %in% c("tsv", "txt")) "\t" else ","
+  read.table(
+    datapath,
+    header = TRUE,
+    sep = sep,
+    check.names = FALSE,
+    stringsAsFactors = FALSE,
+    quote = "\"",
+    comment.char = ""
+  )
+}
+
+prepare_metadata_editor_view <- function(metadata, selected_columns, locked_columns = character(0)) {
+  metadata <- as.data.frame(metadata, stringsAsFactors = FALSE, check.names = FALSE)
+  if (!"Sample" %in% colnames(metadata)) stop("Metadata must contain a Sample column.", call. = FALSE)
+  selected_columns <- as.character(selected_columns)
+  selected_columns <- selected_columns[selected_columns %in% colnames(metadata)]
+  if (!length(selected_columns)) stop("Select at least one column for Table S1. Metadata.", call. = FALSE)
+  if ("RunOrder" %in% colnames(metadata)) {
+    metadata <- metadata[order(is.na(metadata$RunOrder), metadata$RunOrder, seq_len(nrow(metadata))), , drop = FALSE]
+  }
+  list(
+    display = metadata[, selected_columns, drop = FALSE],
+    sample_keys = as.character(metadata$Sample),
+    locked_indices = which(selected_columns %in% locked_columns) - 1L
+  )
+}
+
 sample_exclusion_flags <- function(md, exclusion_terms) {
   if (is.null(md) || nrow(md) == 0) return(logical(0))
   exclusion_terms <- parse_sample_exclusion_text(paste(exclusion_terms, collapse = "\n"))
@@ -37,7 +128,8 @@ sample_exclusion_flags <- function(md, exclusion_terms) {
     colnames(md)
   )
   if (length(match_cols) == 0) return(rep(FALSE, nrow(md)))
-  row_values <- apply(md[, match_cols, drop = FALSE], 1, function(values) {
+  row_values <- lapply(seq_len(nrow(md)), function(row_index) {
+    values <- unlist(md[row_index, match_cols, drop = FALSE], use.names = FALSE)
     values <- as.character(values)
     values <- values[!is.na(values) & nzchar(trimws(values))]
     stems <- tools::file_path_sans_ext(basename(values))
@@ -292,15 +384,18 @@ evosep_write_csl_text <- function(template_text, queue_data) {
   sub(regmatches(template_text, worksheet_match), worksheet, template_text, fixed = TRUE)
 }
 
-replicate_pair_plan <- function(md, header_labels, numerator, denominator) {
+replicate_pair_plan <- function(md, header_labels, numerator, denominator, group_col = "Condition", pair_col = "Replicate") {
+  if (is.null(pair_col) || !length(pair_col) || is.na(pair_col[1]) || !nzchar(pair_col[1])) pair_col <- "Replicate"
+  if (!group_col %in% colnames(md)) return(list(balanced = FALSE, numerator_labels = character(0), denominator_labels = character(0), reason = paste0("metadata column not found: ", group_col)))
+  if (!pair_col %in% colnames(md)) return(list(balanced = FALSE, numerator_labels = character(0), denominator_labels = character(0), reason = paste0("pairing metadata column not found: ", pair_col)))
   pairing <- data.frame(
-    Condition = trimws(as.character(md$Condition)),
-    Replicate = trimws(as.character(md$Replicate)),
+    Group = trimws(as.character(md[[group_col]])),
+    Replicate = trimws(as.character(md[[pair_col]])),
     HeaderLabel = as.character(header_labels),
     stringsAsFactors = FALSE
   )
-  numerator_rows <- pairing[pairing$Condition == numerator, , drop = FALSE]
-  denominator_rows <- pairing[pairing$Condition == denominator, , drop = FALSE]
+  numerator_rows <- pairing[pairing$Group == numerator, , drop = FALSE]
+  denominator_rows <- pairing[pairing$Group == denominator, , drop = FALSE]
 
   blank_replicates <- any(is.na(numerator_rows$Replicate) | !nzchar(numerator_rows$Replicate)) ||
     any(is.na(denominator_rows$Replicate) | !nzchar(denominator_rows$Replicate))
@@ -325,7 +420,7 @@ replicate_pair_plan <- function(md, header_labels, numerator, denominator) {
       balanced = FALSE,
       numerator_labels = character(0),
       denominator_labels = character(0),
-      reason = reason
+      reason = paste0(pair_col, ": ", reason)
     ))
   }
 
@@ -337,6 +432,20 @@ replicate_pair_plan <- function(md, header_labels, numerator, denominator) {
     denominator_labels = denominator_rows$HeaderLabel,
     reason = ""
   )
+}
+
+metadata_spqc_rows <- function(data) {
+  if (is.null(data) || nrow(data) == 0) return(logical(0))
+  search_cols <- intersect(c("Sample", "Run Label", "SampleName", "AnalysisLabel"), colnames(data))
+  if (!length(search_cols)) return(rep(FALSE, nrow(data)))
+  search_text <- do.call(paste, c(lapply(search_cols, function(col) as.character(data[[col]])), sep = " "))
+  rows <- grepl("SPQC", search_text, ignore.case = TRUE)
+  rows[is.na(rows)] <- FALSE
+  rows
+}
+
+spqc_metadata_editable_columns <- function(data) {
+  setdiff(colnames(data), "Sample")
 }
 
 calculate_protein_comparison <- function(report, numerator_cols, denominator_cols, paired = FALSE) {
@@ -356,8 +465,8 @@ calculate_protein_comparison <- function(report, numerator_cols, denominator_col
     numerator_raw[!valid_pairs] <- NA_real_
     denominator_raw[!valid_pairs] <- NA_real_
     pair_counts <- rowSums(valid_pairs)
-    ratios <- numerator_raw / denominator_raw
-    log2_fc <- log2(rowMeans(ratios, na.rm = TRUE))
+    log2_ratios <- log2(numerator_raw / denominator_raw)
+    log2_fc <- rowMeans(log2_ratios, na.rm = TRUE)
     log2_fc[pair_counts < 2 | !is.finite(log2_fc)] <- NaN
     p_value <- vapply(seq_len(nrow(report)), function(i) {
       valid <- valid_pairs[i, ]
@@ -548,17 +657,17 @@ batch_correct_prepare_input <- function(report, md, batch_col, group_col, header
   if (!group_col %in% colnames(md)) stop("Group metadata column not found: ", group_col, call. = FALSE)
   if (anyDuplicated(md$Sample)) stop("Metadata Sample values must be unique for batch correction.", call. = FALSE)
 
-  original_names <- colnames(report)
-  names_without_index <- sub("^\\[[0-9]+\\][[:space:]]*", "", original_names)
-  abundance <- grepl("\\.PG\\.Quantity$", names_without_index)
-  quantity_cols <- original_names[abundance]
-  run_labels <- sub("\\.PG\\.Quantity$", "", names_without_index[abundance])
-  keep <- run_labels %in% as.character(md$Sample)
+  quantity_cols <- proteomics_abundance_columns(report)
+  column_labels <- proteomics_abundance_sample_names(quantity_cols)
+  restored_processed <- any(endsWith(quantity_cols, "_Protein_group_abundance"))
+  metadata_keys <- if (restored_processed) protein_header_labels_from_metadata(md, header_label_columns) else as.character(md$Sample)
+  keep <- column_labels %in% metadata_keys
   quantity_cols <- quantity_cols[keep]
-  run_labels <- run_labels[keep]
+  column_labels <- column_labels[keep]
   if (length(quantity_cols) < 3) stop("Need at least 3 matched S3 abundance columns for batch correction.", call. = FALSE)
 
-  md2 <- md[match(run_labels, as.character(md$Sample)), , drop = FALSE]
+  md2 <- md[match(column_labels, metadata_keys), , drop = FALSE]
+  run_labels <- as.character(md2$Sample)
   valid_metadata <- !is.na(md2[[batch_col]]) & nzchar(trimws(as.character(md2[[batch_col]]))) &
     !is.na(md2[[group_col]]) & nzchar(trimws(as.character(md2[[group_col]])))
   quantity_cols <- quantity_cols[valid_metadata]
@@ -689,7 +798,7 @@ calculate_protein_comparison_log2 <- function(report, numerator_cols, denominato
   list(data = data.frame(log2_fc, p_value, check.names = FALSE), method = "unpaired")
 }
 
-append_log2_stats_to_protein_table <- function(report, md, sample_map, comparisons, paired_comparisons = character(0), include_fdr = TRUE, abundance_suffix = "_batch_corrected_log2") {
+append_log2_stats_to_protein_table <- function(report, md, sample_map, comparisons, paired_comparisons = character(0), include_fdr = TRUE, abundance_suffix = "_batch_corrected_log2", pair_col = "Replicate") {
   if (is.null(comparisons)) comparisons <- character(0)
   if (!length(comparisons)) {
     attr(report, "stats_comparison") <- character(0)
@@ -701,12 +810,13 @@ append_log2_stats_to_protein_table <- function(report, md, sample_map, compariso
   md2$HeaderLabel <- sample_map$HeaderLabel
 
   stats_blocks <- lapply(comparisons, function(comparison) {
-    groups <- strsplit(comparison, "\\|\\|\\|", fixed = FALSE)[[1]]
-    if (length(groups) != 2 || groups[1] == groups[2]) stop("Each statistics comparison must have different numerator and denominator groups.", call. = FALSE)
-    numerator <- groups[1]
-    denominator <- groups[2]
+    parsed_comparison <- parse_stats_comparison_id(comparison)
+    group_col <- parsed_comparison$group_col
+    numerator <- parsed_comparison$numerator
+    denominator <- parsed_comparison$denominator
+    if (!group_col %in% colnames(md2) || numerator == denominator) stop("Each statistics comparison must use a valid metadata column and different groups.", call. = FALSE)
     requested_paired <- comparison %in% paired_comparisons
-    pairing <- replicate_pair_plan(md2, md2$HeaderLabel, numerator, denominator)
+    pairing <- replicate_pair_plan(md2, md2$HeaderLabel, numerator, denominator, group_col = group_col, pair_col = pair_col)
     effective_paired <- requested_paired && pairing$balanced
     fallback_reason <- ""
 
@@ -719,8 +829,8 @@ append_log2_stats_to_protein_table <- function(report, md, sample_map, compariso
       }
     }
     if (!effective_paired) {
-      numerator_cols <- paste0(as.character(md2$HeaderLabel[as.character(md2$Condition) == numerator]), abundance_suffix)
-      denominator_cols <- paste0(as.character(md2$HeaderLabel[as.character(md2$Condition) == denominator]), abundance_suffix)
+      numerator_cols <- paste0(as.character(md2$HeaderLabel[as.character(md2[[group_col]]) == numerator]), abundance_suffix)
+      denominator_cols <- paste0(as.character(md2$HeaderLabel[as.character(md2[[group_col]]) == denominator]), abundance_suffix)
       if (requested_paired && !pairing$balanced) fallback_reason <- pairing$reason
     }
     numerator_cols <- numerator_cols[numerator_cols %in% colnames(report)]
@@ -730,7 +840,7 @@ append_log2_stats_to_protein_table <- function(report, md, sample_map, compariso
     }
 
     result <- calculate_protein_comparison_log2(report, numerator_cols, denominator_cols, paired = effective_paired)
-    comparison_prefix <- paste0(numerator, "_vs_", denominator)
+    comparison_prefix <- stats_comparison_prefix(comparison)
     comparison_df <- data.frame(result$data$log2_fc, result$data$p_value, check.names = FALSE)
     colnames(comparison_df) <- c(
       paste0(comparison_prefix, "_log2_fold_change"),
@@ -739,7 +849,7 @@ append_log2_stats_to_protein_table <- function(report, md, sample_map, compariso
     if (isTRUE(include_fdr)) {
       comparison_df[[paste0(comparison_prefix, "_BH_FDR")]] <- stats::p.adjust(result$data$p_value, method = "BH")
     }
-    method_note <- paste0(numerator, " vs ", denominator, ": ", result$method, " on batch-corrected log2 values")
+    method_note <- paste0(stats_comparison_label(comparison), ": ", result$method, " on batch-corrected log2 values")
     if (requested_paired && !effective_paired) {
       method_note <- paste0(method_note, " (automatic fallback: ", fallback_reason, ")")
     }
@@ -749,7 +859,7 @@ append_log2_stats_to_protein_table <- function(report, md, sample_map, compariso
 
   stats_df <- do.call(cbind, stats_blocks)
   out <- data.frame(report, stats_df, check.names = FALSE)
-  attr(out, "stats_comparison") <- sub("\\|\\|\\|", " vs ", comparisons)
+  attr(out, "stats_comparison") <- vapply(comparisons, stats_comparison_label, character(1))
   attr(out, "stats_methods") <- vapply(stats_blocks, function(block) attr(block, "method_note"), character(1))
   out
 }
@@ -975,24 +1085,34 @@ ui <- fluidPage(
   tabsetPanel(id = "workflow_tabs",
         tabPanel(
           "Make metadata",
-          h4("Open or share project"),
-          fileInput("project_bundle_file", "Select saved Proteomics Data Workup project", accept = ".zip"),
-          actionButton("load_project_bundle", "Open project ZIP"),
-          actionButton("refresh_project_selectors", "Refresh restored project controls"),
-          downloadButton("download_project_bundle", "Export project ZIP"),
-          checkboxInput("project_include_readme", "Include README with R package installation instructions", TRUE),
-          checkboxInput("project_include_session_info", "Include R session information and package versions", FALSE),
+          h4("Open or save project"),
+          fluidRow(
+            column(width = 6, fileInput("project_open_file", "Open existing project", accept = c(".duckdb", ".db", ".rds"))),
+            column(width = 3, actionButton("create_new_project", "Create new project"))
+          ),
+          textOutput("project_path_preview"),
+          fluidRow(
+            column(width = 6, downloadButton("download_project_duckdb", "Save As / Download project")),
+            column(width = 3, actionButton("clear_active_project", "Clear project", class = "btn-warning"))
+          ),
+          tags$small("The active project is a temporary session copy. Download it before closing the app to keep your changes."),
+          verbatimTextOutput("project_status"),
+          tags$small("DuckDB is the default project format. Existing DuckDB and RDS projects can be opened."),
           textInput("download_project_number", "Project number for downloads", value = ""),
           checkboxInput("include_project_number_in_downloads", "Add project number to downloaded filenames", FALSE),
           tags$small("Leave blank to infer the project number from loaded source filenames when possible."),
           checkboxInput("save_download_copy", "Also save downloads to a folder on this computer", FALSE),
           textInput("download_destination_dir", "Download copy destination folder", value = ""),
           verbatimTextOutput("download_destination_note"),
-          tags$small("The project ZIP contains the uploaded source data files and app settings so it can be opened in this app by another user."),
           verbatimTextOutput("project_bundle_note"),
-          h4("Active project files"),
-          tags$small("Files restored from a project ZIP are active even though Shiny cannot repopulate the upload boxes below. Uploading a new file in any box overrides the restored project file for that slot."),
+          h4("Active project data"),
+          tags$small("Only data currently loaded or restored in this project are shown below."),
           DTOutput("project_files_table"),
+          br(),
+          downloadButton("download_active_metadata", "Download active metadata CSV"),
+          fileInput("metadata_replacement_file", "Upload modified metadata CSV", accept = c(".csv", ".tsv", ".txt")),
+          actionButton("apply_metadata_replacement", "Load modified metadata into draft"),
+          verbatimTextOutput("metadata_replacement_note"),
           tags$hr(),
           h4("Global sample exclusions"),
           p("Enter one outlier sample per line. Matching samples are removed from analysis views and exports that use sample measurements, while the metadata keeps a record of the exclusion."),
@@ -1008,6 +1128,8 @@ ui <- fluidPage(
           DTOutput("sample_exclusion_preview"),
           tags$hr(),
           h4("Build analysis metadata"),
+          actionButton("apply_metadata_changes", "Apply metadata changes", class = "btn-primary"),
+          textOutput("metadata_apply_status"),
           p("Use the condition setup as the metadata basis, the run-order table for run order, and the sample-details workbook to add submitted sample names plus any other workbook columns such as batch and group."),
           fileInput("meta_file", "Select condition setup table", accept = c(".csv", ".tsv", ".txt")),
           fileInput("run_order_file", "Select run-order table", accept = c(".csv", ".tsv", ".txt")),
@@ -1046,14 +1168,14 @@ ui <- fluidPage(
             choices = NULL,
             selected = NULL,
             multiple = TRUE,
-            options = list(
-              plugins = list("drag_drop"),
-              placeholder = "Select metadata columns for export"
-            )
+            options = proteomics_multiselect_options("Select metadata columns for export", drag = TRUE)
           ),
           actionButton("reset_metadata_columns", "Restore default columns"),
           tags$small("The Excel worksheet follows this column order. Rows are ordered by RunOrder when a run-order file is selected."),
           textInput("metadata_workbook_filename", "Excel workbook filename", value = "supplementary_tables.xlsx"),
+          h4("Editable metadata"),
+          tags$small("Edit any metadata field except Sample, run order, and filename identifiers. Changes remain drafts until Apply metadata changes is clicked."),
+          actionButton("discard_metadata_edits", "Discard all metadata edits"),
           DTOutput("metadata_preview"),
           tags$hr(),
           downloadButton("download_built_metadata", "Download Table S1 CSV"),
@@ -1062,10 +1184,42 @@ ui <- fluidPage(
         tabPanel(
           "Protein tables",
           h4("Add protein supplementary tables"),
-          p("Upload the original and imputed protein group reports. Sample measurement headers that match metadata Run Label values are renamed for export."),
+          p("Start with the non-imputed protein group report. Table S3 can use a Spectronaut-imputed report, app-generated kNN imputation, or Table S2 without imputation."),
           fileInput("protein_no_impute_file", "Select protein report (no imputation)", accept = c(".csv", ".tsv", ".txt")),
-          fileInput("protein_imputed_file", "Select protein report (imputed + statistics)", accept = c(".csv", ".tsv", ".txt")),
-          tags$small("The imputed protein report is exported as 'Table S3. Protein, imputed'."),
+          h4("Missing-value imputation for Table S3"),
+          radioButtons(
+            "s3_imputation_source",
+            "Table S3 source",
+            choices = c(
+              "Upload a Spectronaut-imputed protein report" = "spectronaut",
+              "Generate Table S3 with kNN from Table S2" = "knn",
+              "Use Table S2 without additional imputation" = "s2"
+            ),
+            selected = "spectronaut"
+          ),
+          conditionalPanel(
+            condition = "input.s3_imputation_source == 'spectronaut'",
+            fileInput("protein_imputed_file", "Select Spectronaut-imputed protein report", accept = c(".csv", ".tsv", ".txt"))
+          ),
+          conditionalPanel(
+            condition = "input.s3_imputation_source == 'knn'",
+            numericInput("protein_knn_k", "Number of nearest proteins (k)", value = 10, min = 1, step = 1),
+            numericInput("protein_knn_max_missing_percent", "Exclude proteins missing more than (%)", value = 50, min = 0, max = 100, step = 5),
+            radioButtons(
+              "protein_knn_scope",
+              "kNN scope",
+              choices = c("All samples together" = "global", "Separately within a metadata field" = "metadata"),
+              selected = "global",
+              inline = TRUE
+            ),
+            conditionalPanel(
+              condition = "input.protein_knn_scope == 'metadata'",
+              selectInput("protein_knn_group_col", "Metadata field defining imputation groups", choices = NULL)
+            ),
+            actionButton("run_protein_knn", "Generate Table S3 with kNN", class = "btn-primary")
+          ),
+          verbatimTextOutput("protein_imputation_status"),
+          tags$small("App kNN operates on log2 protein-group abundances, changes only missing values, and converts results back to abundance scale. The selected source is exported as 'Table S3. Protein, imputed'."),
           verbatimTextOutput("protein_loaded_files_note"),
           selectizeInput(
             "protein_header_label_columns",
@@ -1073,12 +1227,18 @@ ui <- fluidPage(
             choices = NULL,
             selected = c("SampleName"),
             multiple = TRUE,
-            options = list(
-              plugins = list("drag_drop"),
-              placeholder = "Select variables such as Condition, SampleName, or Replicate"
-            )
+            options = proteomics_multiselect_options("Select variables such as Condition, SampleName, or Replicate", drag = TRUE)
           ),
           tags$small("Selected values are joined with underscores, for example Condition_SampleName or Condition_Replicate. Use a unique combination so replicate columns do not collide."),
+          selectizeInput(
+            "protein_quantity_order_columns",
+            "Order protein quantity columns by metadata (drag to reorder)",
+            choices = NULL,
+            selected = NULL,
+            multiple = TRUE,
+            options = proteomics_multiselect_options("For example: Condition, Batch, Replicate, RunOrder", drag = TRUE)
+          ),
+          tags$small("Leave blank to keep the source report order. When selected, sample measurement columns are sorted by these metadata fields before export."),
           h4("Protein information columns"),
           selectizeInput(
             "s2_non_data_columns",
@@ -1086,7 +1246,7 @@ ui <- fluidPage(
             choices = NULL,
             selected = NULL,
             multiple = TRUE,
-            options = list(plugins = list("drag_drop"), placeholder = "Select Table S2 information columns")
+            options = proteomics_multiselect_options("Select Table S2 information columns", drag = TRUE)
           ),
           selectizeInput(
             "s3_non_data_columns",
@@ -1094,16 +1254,17 @@ ui <- fluidPage(
             choices = NULL,
             selected = NULL,
             multiple = TRUE,
-            options = list(plugins = list("drag_drop"), placeholder = "Select Table S3 information columns")
+            options = proteomics_multiselect_options("Select Table S3 information columns", drag = TRUE)
           ),
           tags$small("Sample measurement columns remain in the protein tables after the selected non-data columns."),
+          selectInput("protein_cv_group_col", "Metadata column for %CV calculation", choices = "Condition", selected = "Condition"),
           selectizeInput(
             "cv_conditions",
-            "Calculate %CV for conditions",
+            "Groups for %CV calculation",
             choices = NULL,
             selected = "SPQC",
             multiple = TRUE,
-            options = list(placeholder = "Select conditions for %CV columns")
+            options = proteomics_multiselect_options("Select groups for %CV columns")
           ),
           tags$small("%CV columns use protein group abundance values and are inserted after the protein annotation columns."),
           radioButtons(
@@ -1115,6 +1276,14 @@ ui <- fluidPage(
           ),
           tags$hr(),
           h4("Protein-group statistics"),
+          selectizeInput(
+            "stats_group_columns",
+            "Metadata columns for comparisons",
+            choices = NULL,
+            selected = "Condition",
+            multiple = TRUE,
+            options = proteomics_multiselect_options("Select one or more metadata columns", drag = TRUE)
+          ),
           checkboxGroupInput(
             "stats_tables",
             "Add statistics to tables",
@@ -1131,21 +1300,22 @@ ui <- fluidPage(
               choices = NULL,
               selected = NULL,
               multiple = TRUE,
-              options = list(
-                plugins = list("drag_drop"),
-                placeholder = "Select comparisons, then drag to reorder"
-              )
+              options = stats_comparison_selectize_options()
             ),
             selectizeInput(
               "stats_paired_comparisons",
-              "Paired comparisons (match by Replicate)",
+              "Paired comparisons",
               choices = NULL,
               selected = NULL,
               multiple = TRUE,
-              options = list(placeholder = "Select comparisons to analyze as paired")
+              options = proteomics_multiselect_options("Select comparisons to analyze as paired")
             ),
             checkboxInput("stats_bh_fdr", "Include Benjamini-Hochberg FDR", TRUE),
-            tags$small("Drag selected comparisons to set their order. Paired comparisons match identical Replicate sets, use log2(mean of raw replicate ratios)) for fold change, and use a paired two-sided t-test on log2 abundances. Unbalanced paired selections automatically use the existing unpaired method."),
+            selectInput("stats_pair_col", "Pair samples by metadata", choices = "Replicate", selected = "Replicate"),
+            tags$small("Drag selected comparisons to set their order. Paired comparisons match identical IDs in the selected pairing column, with one sample per ID in each group and at least two pairs. They use the mean paired log2 abundance ratio and a paired two-sided t-test on log2 abundances. Invalid or unbalanced pairing automatically falls back to the unpaired method."),
+          actionButton("run_protein_stats", "Recalculate statistics", class = "btn-primary"),
+          actionButton("stop_protein_stats", "Stop statistics run"),
+          verbatimTextOutput("protein_stats_status"),
           h4("Derived-number export format"),
           numericInput("numeric_sig_figs", "Significant figures", value = 4, min = 1, max = 12, step = 1),
           checkboxInput("scientific_small_values", "Use scientific notation for small derived values", TRUE),
@@ -1186,6 +1356,7 @@ ui <- fluidPage(
             ),
             column(
               width = 8,
+              verbatimTextOutput("batch_cache_note"),
               verbatimTextOutput("batch_correction_note"),
               h4("Corrected S3 preview"),
               DTOutput("batch_corrected_s3_preview")
@@ -1194,45 +1365,57 @@ ui <- fluidPage(
         ),
         tabPanel(
           "CV plots",
-          h4("Protein Group-CV Distribution per Condition"),
-          radioButtons(
-            "cv_plot_source",
-            "CV plot data source",
-            choices = c(
-              "Upload existing CV distribution table" = "uploaded",
-              "Calculate from non-imputed protein report" = "no_impute",
-              "Calculate from imputed protein report" = "imputed",
-              "Calculate from batch-corrected imputed protein report" = "S3_batch_corrected"
+          fluidRow(
+            column(
+              width = 4,
+              h4("Protein Group-CV Distribution per Condition"),
+              radioButtons(
+                "cv_plot_source",
+                "CV plot data source",
+                choices = c(
+                  "Upload existing CV distribution table" = "uploaded",
+                  "Calculate from non-imputed protein report" = "no_impute",
+                  "Calculate from imputed protein report" = "imputed",
+                  "Calculate from batch-corrected imputed protein report" = "S3_batch_corrected"
+                ),
+                selected = "uploaded"
+              ),
+              conditionalPanel(
+                condition = "input.cv_plot_source == 'uploaded'",
+                fileInput("cv_distribution_file", "Select CV distribution table", accept = c(".csv", ".tsv", ".txt"))
+              ),
+              conditionalPanel(
+                condition = "input.cv_plot_source == 'no_impute' || input.cv_plot_source == 'imputed' || input.cv_plot_source == 'S3_batch_corrected'",
+                selectInput("cv_plot_group_col", "Group CV by metadata field", choices = character(0), selected = "Condition"),
+                sliderInput("cv_density_adjust", "Density smoothness", min = 0.1, max = 2, value = 1, step = 0.1),
+                tags$small("1.0 uses the default smoothing; lower values produce a less-smoothed curve with more local detail.")
+              ),
+              selectizeInput("cv_plot_conditions", "Groups to plot", choices = NULL, selected = NULL, multiple = TRUE, options = proteomics_multiselect_options()),
+              numericInput("cv_x_cutoff", "Maximum %CV on x-axis", value = 350, min = 1, step = 10),
+              textInput("cv_plot_title", "CV plot title", value = "Protein Group-CV Distribution per Condition"),
+              checkboxInput("cv_fill_density", "Fill density areas", FALSE),
+              h4("CV plot text and line sizes"),
+              numericInput("cv_title_size", "Title size", value = 12, min = 6, max = 36, step = 1),
+              numericInput("cv_axis_title_size", "Axis title size", value = 11, min = 6, max = 30, step = 1),
+              numericInput("cv_axis_text_size", "Axis tick label size", value = 9, min = 5, max = 24, step = 1),
+              numericInput("cv_legend_text_size", "Legend text size", value = 9, min = 5, max = 24, step = 1),
+              numericInput("cv_median_text_size", "Median label size", value = 3, min = 1, max = 10, step = 0.5),
+              numericInput("cv_line_width", "Density line width", value = 0.65, min = 0.1, max = 3, step = 0.05),
+              h4("Figure size"),
+              numericInput("cv_figure_width", "Export width (inches)", value = 16, min = 2, max = 40, step = 0.5),
+              numericInput("cv_figure_height", "Export height (inches)", value = 5, min = 2, max = 30, step = 0.5),
+              downloadButton("download_cv_png", "Download CV plot PNG"),
+              downloadButton("download_cv_svg", "Download CV plot SVG")
             ),
-            selected = "uploaded"
-          ),
-            conditionalPanel(
-              condition = "input.cv_plot_source == 'uploaded'",
-              fileInput("cv_distribution_file", "Select CV distribution table", accept = c(".csv", ".tsv", ".txt"))
-            ),
-            conditionalPanel(
-              condition = "input.cv_plot_source == 'no_impute' || input.cv_plot_source == 'imputed' || input.cv_plot_source == 'S3_batch_corrected'",
-              sliderInput("cv_density_adjust", "Density smoothness", min = 0.1, max = 2, value = 1, step = 0.1),
-              tags$small("1.0 uses the default smoothing; lower values produce a less-smoothed curve with more local detail.")
-            ),
-            selectizeInput("cv_plot_conditions", "Conditions to plot", choices = NULL, selected = NULL, multiple = TRUE),
-          numericInput("cv_x_cutoff", "Maximum %CV on x-axis", value = 350, min = 1, step = 10),
-          textInput("cv_plot_title", "CV plot title", value = "Protein Group-CV Distribution per Condition"),
-          checkboxInput("cv_fill_density", "Fill density areas", FALSE),
-          h4("CV plot text and line sizes"),
-          numericInput("cv_title_size", "Title size", value = 12, min = 6, max = 36, step = 1),
-          numericInput("cv_axis_title_size", "Axis title size", value = 11, min = 6, max = 30, step = 1),
-          numericInput("cv_axis_text_size", "Axis tick label size", value = 9, min = 5, max = 24, step = 1),
-          numericInput("cv_legend_text_size", "Legend text size", value = 9, min = 5, max = 24, step = 1),
-          numericInput("cv_median_text_size", "Median label size", value = 3, min = 1, max = 10, step = 0.5),
-          numericInput("cv_line_width", "Density line width", value = 0.65, min = 0.1, max = 3, step = 0.05),
-          h4("Figure size"),
-          numericInput("cv_figure_width", "Export width (inches)", value = 16, min = 2, max = 40, step = 0.5),
-          numericInput("cv_figure_height", "Export height (inches)", value = 5, min = 2, max = 30, step = 0.5),
-          uiOutput("cv_plot_ui"),
-          verbatimTextOutput("cv_plot_note"),
-          downloadButton("download_cv_png", "Download CV plot PNG"),
-          downloadButton("download_cv_svg", "Download CV plot SVG")
+            column(
+              width = 8,
+              div(
+                id = "cv_plot_panel",
+                uiOutput("cv_plot_ui"),
+                verbatimTextOutput("cv_plot_note")
+              )
+            )
+          )
         ),
         tabPanel(
           "PCA",
@@ -1240,6 +1423,8 @@ ui <- fluidPage(
             column(
               width = 4,
               h4("ClustVis-like PCA"),
+              actionButton("run_clustvis_pca", "Run PCA"),
+              tags$hr(),
               radioButtons(
                 "clustvis_pca_source",
                 "Abundance source",
@@ -1249,6 +1434,22 @@ ui <- fluidPage(
                   "Batch-corrected imputed protein report (Table S3)" = "S3_batch_corrected"
                 ),
                 selected = "imputed"
+              ),
+              tags$hr(),
+              h4("Sample subset"),
+              selectInput(
+                "clustvis_pca_subset_column",
+                "Subset samples by metadata",
+                choices = c("All samples" = ""),
+                selected = ""
+              ),
+              selectizeInput(
+                "clustvis_pca_subset_values",
+                "Values to include",
+                choices = NULL,
+                selected = NULL,
+                multiple = TRUE,
+                options = proteomics_multiselect_options("Leave empty to include all values")
               ),
               numericInput("clustvis_pca_min_observed_percent", "Minimum observed samples per protein (%)", value = 70, min = 0, max = 100, step = 5),
               numericInput("clustvis_pca_npcs", "SVD imputation / PCA rank", value = 5, min = 2, max = 20, step = 1),
@@ -1271,7 +1472,7 @@ ui <- fluidPage(
                 choices = NULL,
                 selected = NULL,
                 multiple = TRUE,
-                options = list(placeholder = "Select one or more groups")
+                options = proteomics_multiselect_options("Select one or more groups")
               ),
               sliderInput("clustvis_pca_override_opacity", "Selected-group opacity", min = 0, max = 1, value = 0.95, step = 0.05),
               sliderInput("clustvis_pca_default_opacity", "Other-group opacity", min = 0, max = 1, value = 0.65, step = 0.05),
@@ -1280,7 +1481,6 @@ ui <- fluidPage(
               textInput("clustvis_pca_title", "Plot title", value = "ClustVis-like PCA"),
               numericInput("clustvis_pca_width", "Figure width (inches)", value = 10, min = 2, max = 30, step = 0.5),
               numericInput("clustvis_pca_height", "Figure height (inches)", value = 8, min = 2, max = 30, step = 0.5),
-              actionButton("run_clustvis_pca", "Run PCA"),
               downloadButton("download_clustvis_pca_png", "Download PCA PNG"),
               downloadButton("download_clustvis_pca_svg", "Download PCA SVG")
             ),
@@ -1399,11 +1599,19 @@ ui <- fluidPage(
               ),
               selectizeInput(
                 "feature_select",
-                "Protein / feature",
+                "Protein / feature(s)",
                 choices = NULL,
                 selected = NULL,
-                multiple = FALSE,
-                options = list(placeholder = "Type to search protein / feature", create = FALSE, maxOptions = 5000)
+                multiple = TRUE,
+                options = proteomics_multiselect_options("Type to search; select one or more proteins", drag = TRUE, create = FALSE, maxOptions = 5000)
+              ),
+              numericInput(
+                "feature_plot_ncol",
+                "Feature plots per row (when multiple selected)",
+                value = 3,
+                min = 1,
+                max = 12,
+                step = 1
               ),
               selectizeInput(
                 "feature_order_columns",
@@ -1411,11 +1619,10 @@ ui <- fluidPage(
                 choices = NULL,
                 selected = NULL,
                 multiple = TRUE,
-                options = list(
-                  plugins = list("drag_drop"),
-                  placeholder = "For example: Group, Batch, RunOrder"
-                )
+                options = proteomics_multiselect_options("For example: Group, Batch, RunOrder", drag = TRUE)
               ),
+              selectInput("feature_group_by", "Color/group samples by metadata", choices = c("Condition"), selected = "Condition"),
+              selectInput("feature_label_by", "Label samples by metadata", choices = c("AnalysisLabel"), selected = "AnalysisLabel"),
               textInput("feature_plot_title", "Feature plot title", value = ""),
               numericInput("feature_title_size", "Feature title size", value = 18, min = 8, max = 40, step = 1),
               numericInput("feature_bar_width", "Bar width", value = 0.7, min = 0.1, max = 1.0, step = 0.05),
@@ -1467,21 +1674,30 @@ ui <- fluidPage(
                 selected = "imputed"
               ),
               selectizeInput(
-                "script_box_feature",
-                "Protein / feature",
+                "script_box_features",
+                "Proteins / features",
                 choices = NULL,
                 selected = NULL,
-                multiple = FALSE,
-                options = list(placeholder = "Type to search protein / feature", create = FALSE, maxOptions = 5000)
+                multiple = TRUE,
+                options = proteomics_multiselect_options("Select one or more proteins", drag = TRUE, create = FALSE, maxOptions = 5000)
+              ),
+              numericInput(
+                "script_box_ncol",
+                "Boxplot panels per row (when multiple selected)",
+                value = 3,
+                min = 1,
+                max = 12,
+                step = 1
               ),
               selectInput("script_box_group_by", "Group samples by metadata", choices = c("Condition"), selected = "Condition"),
+              selectInput("script_box_label_by", "Label points by metadata", choices = c("None"), selected = "None"),
               selectizeInput(
                 "script_box_conditions",
                 "Conditions/groups to include and order",
                 choices = NULL,
                 selected = NULL,
                 multiple = TRUE,
-                options = list(plugins = list("drag_drop"), placeholder = "Leave blank to use all groups")
+                options = proteomics_multiselect_options("Leave blank to use all groups", drag = TRUE)
               ),
               radioButtons(
                 "script_box_value_scale",
@@ -1500,6 +1716,8 @@ ui <- fluidPage(
               textInput("script_box_title", "Plot title (blank = feature)", value = ""),
               textInput("script_box_y_axis_title", "Y-axis title (blank = automatic)", value = ""),
               numericInput("script_box_point_size", "Point size", value = 3, min = 0.5, max = 10, step = 0.5),
+              sliderInput("script_box_point_opacity", "Point opacity", min = 0.05, max = 1, value = 0.85, step = 0.05),
+              numericInput("script_box_label_size", "Point label size", value = 3, min = 1, max = 10, step = 0.5),
               numericInput("script_box_text_size", "Text size", value = 18, min = 6, max = 36, step = 1),
               numericInput("script_box_width", "Figure width (inches)", value = 6.5, min = 2, max = 30, step = 0.5),
               numericInput("script_box_height", "Figure height (inches)", value = 5.5, min = 2, max = 30, step = 0.5),
@@ -1561,7 +1779,7 @@ ui <- fluidPage(
                 choices = NULL,
                 selected = NULL,
                 multiple = TRUE,
-                options = list(placeholder = "Leave blank to use all groups")
+                options = proteomics_multiselect_options("Leave blank to use all groups")
               ),
               selectizeInput(
                 "correlation_covariates",
@@ -1569,7 +1787,7 @@ ui <- fluidPage(
                 choices = NULL,
                 selected = NULL,
                 multiple = TRUE,
-                options = list(placeholder = "Optional: Batch, Group, age, etc.")
+                options = proteomics_multiselect_options("Optional: Batch, Group, age, etc.")
               ),
               selectInput(
                 "correlation_rank_by",
@@ -1792,11 +2010,90 @@ server <- function(input, output, session) {
   project_restore_token <- reactiveVal(0L)
   project_bundle_message <- reactiveVal("No saved project is open. Upload source files directly or open a project ZIP.")
   download_destination_message <- reactiveVal("Browser downloads use your browser's download settings. Enable folder copies to save an additional copy from the app.")
+  project_db_cache <- reactiveVal(list())
+  ignored_project_upload_paths <- reactiveVal(list())
+  pending_new_project_path <- reactiveVal("")
+  generated_s3_result <- reactiveVal(NULL)
+  active_metadata_override <- reactiveVal(NULL)
+  metadata_replacement_message <- reactiveVal("No replacement metadata applied this session.")
+  active_project_path <- reactiveVal("")
+  active_project_display_name <- reactiveVal("")
+  active_project_last_saved <- reactiveVal(NULL)
+  active_project_last_error <- reactiveVal("")
+  active_project_autosave_requested_at <- reactiveVal(NULL)
+  active_project_autosave_pending_reason <- reactiveVal("")
+  active_project_autosave_include_derived <- reactiveVal(FALSE)
+  project_database_message <- reactiveVal("No active DuckDB/RDS project is open.")
+  cached_batch_corrected_s3_result <- reactiveVal(NULL)
+  batch_cache_message <- reactiveVal("No saved batch correction is loaded.")
+spqc_metadata_edits <- reactiveVal(empty_spqc_metadata_edits())
+spqc_metadata_draft_edits <- reactiveVal(empty_spqc_metadata_edits())
+spqc_clear_pending <- reactiveVal(FALSE)
+applied_metadata_state <- reactiveVal(empty_proteomics_metadata_state())
+metadata_apply_revision <- reactiveVal(0L)
+metadata_editor_revision <- reactiveVal(0L)
+metadata_apply_message <- reactiveVal("Metadata changes have not been applied.")
+metadata_draft_tracking_enabled <- reactiveVal(TRUE)
+protein_stats_paused <- reactiveVal(FALSE)
+  protein_stats_refresh_revision <- reactiveVal(0L)
+  stopped_stats_tables <- reactiveVal(character(0))
+
+  observeEvent(input$run_protein_stats, {
+    protein_stats_paused(FALSE)
+    protein_stats_refresh_revision(protein_stats_refresh_revision() + 1L)
+    showNotification("Statistics recalculation requested.", type = "message", duration = 3)
+  })
 
   project_file <- function(id) {
     imported <- imported_project_files()[[id]]
     if (!is.null(imported)) return(normalize_project_file_info(imported))
-    normalize_project_file_info(input[[id]])
+    direct <- normalize_project_file_info(input[[id]])
+    if (proteomics_upload_is_ignored(direct, ignored_project_upload_paths()[[id]])) return(NULL)
+    direct
+  }
+
+  current_project_upload_paths <- function() {
+    paths <- lapply(project_file_ids, function(id) {
+      file_info <- normalize_project_file_info(input[[id]])
+      if (is.null(file_info)) "" else as.character(file_info$datapath[1L])
+    })
+    stats::setNames(paths, project_file_ids)
+  }
+
+  protein_source_table <- function(source) {
+    no_impute <- proteomics_is_no_impute_source(source)
+    if (no_impute) {
+      file_info <- project_file("protein_no_impute_file")
+      uploaded <- if (is.null(file_info)) NULL else read_uploaded_table(file_info)
+      table <- resolve_proteomics_project_table(uploaded, project_db_cache(), "processed_s2")
+    } else {
+      s3_file <- project_file("protein_imputed_file")
+      uploaded_s3 <- if (is.null(s3_file)) NULL else read_uploaded_table(s3_file)
+      s2_file <- project_file("protein_no_impute_file")
+      uploaded_s2 <- if (is.null(s2_file)) NULL else read_uploaded_table(s2_file)
+      s2 <- resolve_proteomics_project_table(uploaded_s2, project_db_cache(), "processed_s2")
+      generated <- generated_s3_result()
+      generated <- if (is.null(generated)) NULL else generated$data
+      method <- input$s3_imputation_source
+      if (is.null(method) || !length(method)) method <- "spectronaut"
+      cached_s3 <- project_db_cache()$processed_s3
+      if (identical(method, "knn") && !is.null(s2_file) && is.null(generated)) cached_s3 <- NULL
+      table <- resolve_protein_s3_source(method, uploaded_s3, cached_s3, generated, s2)
+    }
+    validate(need(!is.null(table), paste0("Upload ", if (no_impute) "Table S2" else "Table S3", " or open a DuckDB project containing it.")))
+    table
+  }
+
+  protein_source_available <- function(source) {
+    no_impute <- proteomics_is_no_impute_source(source)
+    if (no_impute) return(!is.null(project_file("protein_no_impute_file")) || !is.null(project_db_cache()$processed_s2))
+    method <- input$s3_imputation_source
+    if (is.null(method) || !length(method)) method <- "spectronaut"
+    if (identical(method, "s2")) return(protein_source_available("S2"))
+    if (identical(method, "knn")) {
+      return(!is.null(generated_s3_result()) || (is.null(project_file("protein_no_impute_file")) && !is.null(project_db_cache()$processed_s3)))
+    }
+    !is.null(project_file("protein_imputed_file")) || !is.null(project_db_cache()$processed_s3)
   }
 
   project_number_for_downloads <- function() {
@@ -1815,6 +2112,12 @@ server <- function(input, output, session) {
 
   project_file_status <- reactive({
     imported <- imported_project_files()
+    cache <- project_db_cache()
+    restored_cache_name <- c(
+      meta_file = "metadata",
+      protein_no_impute_file = "processed_s2",
+      protein_imputed_file = "processed_s3"
+    )
     data.frame(
       FileType = unname(project_file_labels[project_file_ids]),
       InputID = project_file_ids,
@@ -1823,13 +2126,19 @@ server <- function(input, output, session) {
           "Restored from project ZIP"
         } else if (!is.null(input[[id]])) {
           "Uploaded directly"
+        } else if (id %in% names(restored_cache_name) && !is.null(cache[[restored_cache_name[[id]]]])) {
+          paste0("Restored from DuckDB (", nrow(cache[[restored_cache_name[[id]]]]), " rows)")
         } else {
           "Not loaded"
         }
       }, character(1)),
       FileName = vapply(project_file_ids, function(id) {
         source <- project_file(id)
-        if (!is.null(source) && !is.null(source$name) && nzchar(source$name)) source$name else ""
+        if (!is.null(source) && !is.null(source$name) && nzchar(source$name)) {
+          source$name
+        } else if (id %in% names(restored_cache_name) && !is.null(cache[[restored_cache_name[[id]]]])) {
+          paste0(restored_cache_name[[id]], " (database table)")
+        } else ""
       }, character(1)),
       stringsAsFactors = FALSE
     )
@@ -1837,11 +2146,31 @@ server <- function(input, output, session) {
 
   lapply(project_file_ids, function(id) {
     observeEvent(input[[id]], {
+    if (id %in% c("meta_file", "run_order_file", "sample_details_file")) {
+      active_metadata_override(NULL)
+      spqc_metadata_draft_edits(empty_spqc_metadata_edits())
+      metadata_replacement_message("Source metadata changed; no replacement metadata is active.")
+      }
       imported <- imported_project_files()
       if (!is.null(imported[[id]])) {
         imported[[id]] <- NULL
         imported_project_files(imported)
         project_bundle_message(paste0("Opened project is active; replaced project source file: ", input[[id]]$name, "."))
+      }
+      cache <- project_db_cache()
+      if (length(cache)) {
+        if (id %in% c("meta_file", "run_order_file", "sample_details_file")) {
+          metadata_apply_message("Unapplied metadata changes.")
+          project_database_message(paste0("Metadata source loaded into draft: ", input[[id]]$name, ". Click Apply metadata changes to update subsequent tabs."))
+        } else {
+          project_db_cache(invalidate_proteomics_project_cache(cache, id))
+          cached_batch_corrected_s3_result(NULL)
+          if (id %in% c("condition_setup_sample_details_file", "condition_setup_template_file")) {
+            project_database_message(paste0("Condition-setup source replaced: ", input[[id]]$name, "."))
+          } else if (id %in% c("protein_no_impute_file", "protein_imputed_file")) {
+            project_database_message(paste0("Protein source replaced: ", input[[id]]$name, ". Dependent processed results were invalidated."))
+          }
+        }
       }
     }, ignoreInit = TRUE)
   })
@@ -1859,14 +2188,16 @@ server <- function(input, output, session) {
         "evosep_xcalibur_method",
         "metadata_export_columns", "metadata_workbook_filename", "s2_non_data_columns",
       "s3_non_data_columns", "protein_header_label_mode", "protein_header_label_columns",
+      "protein_quantity_order_columns", "s3_imputation_source", "protein_knn_k",
+      "protein_knn_max_missing_percent", "protein_knn_scope", "protein_knn_group_col",
       "spqc_assignment_mode", "spqc_group_label", "spqc_group_prefix", "spqc_batch_overrides",
-      "sample_exclusions_text", "sample_exclusion_reason", "cv_conditions",
-      "protein_derived_column_order", "stats_tables", "stats_comparisons", "stats_paired_comparisons",
+      "sample_exclusions_text", "sample_exclusion_reason", "protein_cv_group_col", "cv_conditions",
+      "protein_derived_column_order", "stats_tables", "stats_group_columns", "stats_comparisons", "stats_paired_comparisons", "stats_pair_col",
       "stats_bh_fdr", "numeric_sig_figs", "scientific_small_values",
       "scientific_threshold", "enable_protein_filters", "cv_plot_source",
       "batch_correction_source", "batch_correction_batch_col", "batch_correction_group_col",
       "batch_correction_combat_mode", "batch_correction_pseudocount", "batch_correction_min_batches_for_feature",
-      "cv_plot_conditions", "cv_density_adjust", "cv_x_cutoff", "cv_plot_title",
+      "cv_plot_group_col", "cv_plot_conditions", "cv_density_adjust", "cv_x_cutoff", "cv_plot_title",
       "cv_fill_density", "cv_title_size", "cv_axis_title_size", "cv_axis_text_size",
       "cv_legend_text_size", "cv_median_text_size", "cv_line_width",
       "cv_figure_width", "cv_figure_height", "pca_data_source",
@@ -1875,7 +2206,8 @@ server <- function(input, output, session) {
       "manual_ncp", "sample_id_col", "label_mode", "color_by", "shape_by",
       "label_points", "label_missing_points", "point_size", "label_size", "plot_title", "plot_subtitle",
       "pca_figure_width", "pca_figure_height",
-      "clustvis_pca_source", "clustvis_pca_min_observed_percent", "clustvis_pca_npcs",
+      "clustvis_pca_source", "clustvis_pca_subset_column", "clustvis_pca_subset_values",
+      "clustvis_pca_min_observed_percent", "clustvis_pca_npcs",
       "clustvis_pca_scale", "clustvis_pca_ellipses", "clustvis_pca_color_by",
       "clustvis_pca_shape_by", "clustvis_pca_label_by", "clustvis_pca_point_size",
       "clustvis_pca_label_size", "clustvis_pca_title", "clustvis_pca_width",
@@ -1890,18 +2222,18 @@ server <- function(input, output, session) {
       "volcano_interactive", "gsea_source", "gsea_comparison", "gsea_rank_metric",
       "gsea_gene_col", "gsea_species", "gsea_collection", "gsea_min_size",
       "gsea_max_size", "gsea_top_n", "gsea_plot_width", "gsea_plot_height",
-      "feature_data_source", "feature_select", "feature_order_columns",
+      "feature_data_source", "feature_select", "feature_order_columns", "feature_group_by", "feature_label_by",
       "feature_plot_title", "feature_title_size", "feature_bar_width",
       "feature_text_size", "feature_value_scale", "feature_color_mode", "feature_symmetric_scale",
       "feature_group_style", "show_feature_mean", "rotate_feature_labels",
-      "feature_interactive", "feature_figure_width", "feature_figure_height",
+      "feature_interactive", "feature_figure_width", "feature_figure_height", "feature_plot_ncol",
       "box_group_by", "box_plot_style", "box_value_scale", "box_plot_title",
       "box_y_axis_title", "box_point_size", "box_text_size",
       "box_figure_width", "box_figure_height",
-      "script_box_source", "script_box_feature", "script_box_group_by",
+      "script_box_source", "script_box_features", "script_box_group_by", "script_box_label_by",
       "script_box_conditions", "script_box_value_scale", "script_box_plot_style", "script_box_title",
-      "script_box_y_axis_title", "script_box_point_size", "script_box_text_size",
-      "script_box_width", "script_box_height",
+      "script_box_y_axis_title", "script_box_point_size", "script_box_point_opacity", "script_box_label_size", "script_box_text_size",
+      "script_box_width", "script_box_height", "script_box_ncol",
       "correlation_source", "correlation_feature", "correlation_value_scale",
       "correlation_method", "correlation_group_by", "correlation_groups",
       "correlation_covariates", "correlation_rank_by", "correlation_top_n", "correlation_exclude_reference",
@@ -1912,10 +2244,43 @@ server <- function(input, output, session) {
       "identification_overview_width", "identification_overview_height",
       "run_identifications_width", "run_identifications_height"
     )
-    stats::setNames(lapply(ids, function(id) input[[id]]), ids)
+    settings <- stats::setNames(lapply(ids, function(id) input[[id]]), ids)
+    settings$workflow_tabs <- input$workflow_tabs
+    settings
+  }
+
+  batch_correction_cache_signature <- function() {
+    validate(need(requireNamespace("jsonlite", quietly = TRUE), "Package 'jsonlite' is required to cache batch correction results."))
+    file_signatures <- lapply(c("meta_file", "run_order_file", "sample_details_file", "protein_imputed_file"), function(id) {
+      source <- project_file(id)
+      if (is.null(source) || !file.exists(source$datapath)) return(NULL)
+      integrity <- file_integrity(source$datapath)
+      list(
+        input_id = id,
+        name = source$name,
+        size_bytes = integrity$size_bytes,
+        md5 = integrity$md5
+      )
+    })
+    names(file_signatures) <- c("meta_file", "run_order_file", "sample_details_file", "protein_imputed_file")
+    jsonlite::toJSON(
+      list(
+        artifact_type = "S3_batch_corrected_result",
+        app_name = "Proteomics Data Workup",
+        files = file_signatures,
+        settings = project_settings()
+      ),
+      auto_unbox = TRUE,
+      null = "null"
+    )
   }
 
   restore_project_settings <- function(settings) {
+    pair_col <- if (is.null(settings$stats_pair_col)) "Replicate" else as.character(settings$stats_pair_col)[1L]
+    updateSelectInput(session, "stats_pair_col", choices = unique(c("Replicate", pair_col)), selected = pair_col)
+    if (is.null(settings$script_box_features) && !is.null(settings$script_box_feature)) {
+      settings$script_box_features <- settings$script_box_feature
+    }
     update_text <- c(
         "metadata_workbook_filename", "report_feature_col", "sample_id_col", "plot_title",
         "plot_subtitle", "png_filename", "svg_filename", "volcano_title",
@@ -1941,18 +2306,19 @@ server <- function(input, output, session) {
       "feature_text_size", "identification_title_size", "identification_axis_text_size",
       "identification_legend_size", "cv_figure_width", "cv_figure_height",
       "pca_figure_width", "pca_figure_height", "volcano_figure_width",
-      "volcano_figure_height", "feature_figure_width", "feature_figure_height",
+      "volcano_figure_height", "feature_figure_width", "feature_figure_height", "feature_plot_ncol",
       "box_point_size", "box_text_size", "box_figure_width", "box_figure_height",
       "clustvis_pca_min_observed_percent", "clustvis_pca_npcs", "clustvis_pca_point_size",
       "clustvis_pca_label_size", "clustvis_pca_width", "clustvis_pca_height",
-      "script_box_point_size", "script_box_text_size", "script_box_width", "script_box_height",
+      "script_box_point_size", "script_box_point_opacity", "script_box_label_size", "script_box_text_size", "script_box_width", "script_box_height", "script_box_ncol",
       "correlation_top_n", "correlation_figure_width", "correlation_figure_height",
       "identification_overview_width", "identification_overview_height",
       "run_identifications_width", "run_identifications_height",
       "pca_loading_top_n", "gsea_min_size", "gsea_max_size", "gsea_top_n",
       "gsea_plot_width", "gsea_plot_height", "clustvis_pca_override_opacity",
       "clustvis_pca_default_opacity", "batch_correction_combat_mode",
-      "batch_correction_pseudocount", "batch_correction_min_batches_for_feature"
+      "batch_correction_pseudocount", "batch_correction_min_batches_for_feature",
+      "protein_knn_k", "protein_knn_max_missing_percent"
     )
     update_checkbox <- c(
       "project_include_readme", "project_include_session_info",
@@ -1970,22 +2336,24 @@ server <- function(input, output, session) {
       "script_box_value_scale", "script_box_plot_style", "protein_header_label_mode",
       "protein_derived_column_order", "spqc_assignment_mode", "gsea_source", "gsea_rank_metric",
       "gsea_species", "gsea_collection", "batch_correction_source",
-      "correlation_source", "correlation_value_scale", "correlation_method"
+      "correlation_source", "correlation_value_scale", "correlation_method",
+      "s3_imputation_source", "protein_knn_scope"
     )
     update_select <- c(
         "data_layout", "label_mode", "color_by", "shape_by", "volcano_comparison",
         "volcano_significance_metric", "volcano_label_col", "feature_color_mode",
-        "feature_group_style", "box_group_by", "box_plot_style", "identification_metric",
-        "clustvis_pca_color_by", "clustvis_pca_shape_by", "clustvis_pca_label_by",
+        "feature_group_style", "feature_group_by", "feature_label_by", "box_group_by", "box_plot_style", "identification_metric",
+        "clustvis_pca_color_by", "clustvis_pca_shape_by", "clustvis_pca_label_by", "clustvis_pca_subset_column",
         "pca_loading_rank_by", "gsea_comparison", "gsea_gene_col",
         "correlation_rank_by", "correlation_group_by",
-        "script_box_group_by", "batch_correction_batch_col", "batch_correction_group_col",
-        "condition_setup_condition_col", "condition_setup_replicate_order_col"
+        "script_box_label_by", "batch_correction_batch_col", "batch_correction_group_col",
+        "condition_setup_condition_col", "condition_setup_replicate_order_col", "protein_cv_group_col", "cv_plot_group_col",
+        "protein_knn_group_col"
     )
     update_selectize <- c(
-      "metadata_export_columns", "s2_non_data_columns", "s3_non_data_columns",
-      "cv_plot_conditions",
-      "feature_select", "feature_order_columns", "script_box_feature", "script_box_conditions",
+      "s2_non_data_columns", "s3_non_data_columns",
+      "cv_plot_conditions", "clustvis_pca_subset_values",
+      "feature_select", "script_box_features",
       "clustvis_pca_opacity_override_groups", "correlation_feature",
       "correlation_groups", "correlation_covariates"
     )
@@ -1996,6 +2364,9 @@ server <- function(input, output, session) {
     for (id in update_radio) if (!is.null(settings[[id]])) updateRadioButtons(session, id, selected = settings[[id]])
     for (id in update_select) if (!is.null(settings[[id]])) updateSelectInput(session, id, selected = settings[[id]])
     for (id in update_selectize) if (!is.null(settings[[id]])) updateSelectizeInput(session, id, selected = unlist(settings[[id]]), server = TRUE)
+    if (!is.null(settings$workflow_tabs)) {
+      session$onFlushed(function() updateTabsetPanel(session, "workflow_tabs", selected = settings$workflow_tabs), once = TRUE)
+    }
   }
 
   write_project_bundle <- function(file) {
@@ -2045,7 +2416,7 @@ server <- function(input, output, session) {
     }
     comparison_labels <- function(value) {
       if (is.null(value) || length(value) == 0) return("Not set")
-      labels <- sub("\\|\\|\\|", " vs ", unlist(value, use.names = FALSE))
+      labels <- vapply(unlist(value, use.names = FALSE), stats_comparison_label, character(1))
       labels <- labels[!is.na(labels) & nzchar(labels)]
       if (length(labels) == 0) return("Not set")
       paste(labels, collapse = ", ")
@@ -2073,9 +2444,15 @@ server <- function(input, output, session) {
       paste0("- Metadata sample ID column: ", format_value(settings$sample_id_col)),
       "",
       "Protein Tables",
+      paste0("- Table S3 source: ", format_value(settings$s3_imputation_source)),
+      paste0("- kNN nearest proteins: ", format_value(settings$protein_knn_k)),
+      paste0("- kNN maximum missingness (%): ", format_value(settings$protein_knn_max_missing_percent)),
+      paste0("- kNN scope: ", format_value(settings$protein_knn_scope)),
+      paste0("- kNN metadata field: ", format_value(settings$protein_knn_group_col)),
       paste0("- Table S2 non-data columns and order: ", format_value(settings$s2_non_data_columns)),
       paste0("- Table S3 non-data columns and order: ", format_value(settings$s3_non_data_columns)),
       paste0("- Measurement header variables: ", format_value(settings$protein_header_label_columns)),
+      paste0("- Protein quantity column order: ", format_value(settings$protein_quantity_order_columns)),
       paste0("- CV conditions: ", format_value(settings$cv_conditions)),
       paste0("- Derived column order: ", if (identical(settings$protein_derived_column_order, "stats_before_cv")) "Statistics before CV columns" else "CV columns before statistics"),
       paste0("- Statistics tables: ", format_value(settings$stats_tables)),
@@ -2140,7 +2517,7 @@ server <- function(input, output, session) {
     )
     writeLines(summary_lines, file.path(bundle_dir, "project_summary_README.txt"))
     if (isTRUE(input$project_include_readme)) {
-      required_packages <- c("shiny", "ggplot2", "plotly", "htmlwidgets", "DT", "dplyr", "stringr", "missMDA", "FactoMineR", "svglite", "readxl", "openxlsx", "jsonlite", "zip", "msigdbr", "BiocManager")
+      required_packages <- c("shiny", "ggplot2", "plotly", "htmlwidgets", "DT", "dplyr", "stringr", "missMDA", "FactoMineR", "svglite", "readxl", "openxlsx", "jsonlite", "DBI", "duckdb", "zip", "msigdbr", "BiocManager")
       optional_packages <- c("fgsea", "HarmonizR")
       install_line <- paste0("install.packages(c(", paste(sprintf("\"%s\"", required_packages), collapse = ", "), "))")
       optional_line <- paste0("install.packages(c(", paste(sprintf("\"%s\"", optional_packages), collapse = ", "), "))")
@@ -2183,6 +2560,10 @@ server <- function(input, output, session) {
     if (isTRUE(input$project_include_session_info)) {
       capture.output(utils::sessionInfo(), file = file.path(bundle_dir, "sessionInfo.txt"))
     }
+    if (proteomics_duckdb_available()) {
+      cache_path <- file.path(bundle_dir, "project_cache.duckdb")
+      validate(need(save_active_project_state("ZIP project cache", include_derived = TRUE, destination = cache_path), "Could not create the embedded DuckDB project cache."))
+    }
     temporary_zip <- tempfile("proteomics_project_validated_", fileext = ".zip")
     on.exit(unlink(temporary_zip, force = TRUE), add = TRUE)
     zip::zipr(temporary_zip, list.files(bundle_dir, recursive = TRUE, full.names = TRUE), root = bundle_dir)
@@ -2209,6 +2590,11 @@ server <- function(input, output, session) {
     progress <- shiny::Progress$new(session, min = 0, max = 4)
     progress$set(message = "Opening project ZIP", value = 0, detail = "Inspecting archive")
     on.exit(progress$close(), add = TRUE)
+    metadata_draft_tracking_enabled(FALSE)
+    project_db_cache(list())
+    applied_metadata_state(empty_proteomics_metadata_state())
+    spqc_metadata_draft_edits(empty_spqc_metadata_edits())
+    spqc_clear_pending(FALSE)
     listing <- tryCatch(utils::unzip(file_info$datapath, list = TRUE), error = function(error) NULL)
     validate(need(!is.null(listing) && nrow(listing) > 0, "Project ZIP is unreadable or empty."))
     archive_entries <- as.character(listing$Name)
@@ -2282,16 +2668,46 @@ server <- function(input, output, session) {
     imported_project_files(restored_files)
     settings <- manifest$settings
     if (is.null(settings)) settings <- list()
+    if ("project_cache.duckdb" %in% archive_entries && proteomics_duckdb_available()) {
+      utils::unzip(file_info$datapath, files = "project_cache.duckdb", exdir = import_dir)
+      embedded <- load_proteomics_project_file(file.path(import_dir, "project_cache.duckdb"))
+      project_db_cache(embedded)
+      if (!is.null(embedded$settings)) settings <- embedded$settings
+      spqc_metadata_draft_edits(empty_spqc_metadata_edits())
+      if (!is.null(embedded$spqc_metadata_edits)) spqc_metadata_edits(embedded$spqc_metadata_edits)
+    }
     restored_project_settings(settings)
+    embedded_metadata <- project_db_cache()$metadata
+    if (!is.null(embedded_metadata)) {
+      initialize_applied_metadata(embedded_metadata, settings, spqc_metadata_edits())
+    } else {
+      session$onFlushed(function() {
+        tryCatch(
+          initialize_applied_metadata(
+            isolate(draft_metadata()),
+            settings,
+            isolate(spqc_metadata_edits())
+          ),
+          error = function(e) metadata_apply_message(paste0("Restored metadata requires Apply: ", conditionMessage(e)))
+        )
+      }, once = TRUE)
+    }
     project_restore_token(isolate(project_restore_token()) + 1L)
     restore_project_settings(settings)
+    session$onFlushed(function() {
+      session$onFlushed(function() {
+        metadata_draft_tracking_enabled(TRUE)
+        applied_state <- isolate(applied_metadata_state())
+        if (!is.null(applied_state$metadata)) metadata_apply_message("All metadata changes applied.")
+      }, once = TRUE)
+    }, once = TRUE)
     restore_stage <- function(stage) {
       session$onFlushed(function() {
         restore_project_settings(settings)
         if (stage < 2L) {
           restore_stage(stage + 1L)
         } else {
-          sync_restored_project_inputs(settings)
+          isolate(sync_restored_project_inputs(settings))
         }
       }, once = TRUE)
     }
@@ -2315,6 +2731,323 @@ server <- function(input, output, session) {
     req(input$project_bundle_file)
     load_project_bundle_file(input$project_bundle_file)
   })
+
+  active_project_path_from_input <- function() {
+    path <- active_project_path()
+    if (is.null(path) || !length(path) || !nzchar(path)) stop("Open or create a project first.", call. = FALSE)
+    path
+  }
+
+  initialize_applied_metadata <- function(metadata, settings = list(), edits = empty_spqc_metadata_edits()) {
+    if (is.null(metadata) || !nrow(metadata)) {
+      applied_metadata_state(empty_proteomics_metadata_state())
+      metadata_apply_message("Metadata changes have not been applied.")
+      return(invisible(FALSE))
+    }
+    metadata <- as.data.frame(metadata, stringsAsFactors = FALSE, check.names = FALSE)
+    columns <- unlist(settings$metadata_export_columns, use.names = FALSE)
+    columns <- columns[columns %in% colnames(metadata)]
+    if (!length(columns)) columns <- metadata_default_columns(colnames(metadata))
+    if (!length(columns)) columns <- colnames(metadata)
+    state <- build_proteomics_applied_state(metadata, columns, edits, empty_spqc_metadata_edits())
+    applied_metadata_state(state)
+    spqc_metadata_edits(state$spqc_metadata_edits)
+    spqc_metadata_draft_edits(empty_spqc_metadata_edits())
+    spqc_clear_pending(FALSE)
+    metadata_apply_revision(isolate(metadata_apply_revision()) + 1L)
+    metadata_apply_message("All metadata changes applied.")
+    invisible(TRUE)
+  }
+
+  output$project_path_preview <- renderText({
+    name <- active_project_display_name()
+    if (is.null(name) || !length(name) || !nzchar(name)) "Active project: none" else paste0("Active project: ", name, " (session copy)")
+  })
+
+  load_project_into_session <- function(path, display_name = basename(path), activate_path = FALSE) {
+    metadata_draft_tracking_enabled(FALSE)
+    loaded <- load_proteomics_project_file(path)
+    active_project_display_name(display_name)
+    ignored_project_upload_paths(current_project_upload_paths())
+    active_metadata_override(NULL)
+    metadata_replacement_message("No replacement metadata applied this session.")
+    validate(need(is.list(loaded) && !is.null(loaded$manifest), "The selected file is not a valid Proteomics Data Workup project."))
+    project_db_cache(loaded)
+    imported_project_files(list())
+    spqc_metadata_draft_edits(empty_spqc_metadata_edits())
+    spqc_metadata_edits(if (is.null(loaded$spqc_metadata_edits)) empty_spqc_metadata_edits() else loaded$spqc_metadata_edits)
+    settings <- if (is.null(loaded$settings)) list() else loaded$settings
+    initialize_applied_metadata(loaded$metadata, settings, spqc_metadata_edits())
+    protein_stats_refresh_revision(0L)
+    protein_stats_paused(FALSE)
+    restored_project_settings(settings)
+    project_restore_token(isolate(project_restore_token()) + 1L)
+    restore_project_settings(settings)
+    session$onFlushed(function() isolate(sync_restored_project_inputs(settings)), once = TRUE)
+    session$onFlushed(function() {
+      session$onFlushed(function() {
+        metadata_draft_tracking_enabled(TRUE)
+        applied_state <- isolate(applied_metadata_state())
+        if (!is.null(applied_state$metadata)) metadata_apply_message("All metadata changes applied.")
+      }, once = TRUE)
+    }, once = TRUE)
+    cached_batch_corrected_s3_result(NULL)
+    if (!is.null(loaded$batch_corrected_s3)) {
+      corrected_table <- as.data.frame(loaded$batch_corrected_s3, stringsAsFactors = FALSE, check.names = FALSE)
+      abundance_columns <- grep("_batch_corrected_Protein_group_abundance$", colnames(corrected_table), value = TRUE)
+      if (length(abundance_columns)) {
+        corrected_abundance <- as.data.frame(lapply(corrected_table[abundance_columns], function(x) suppressWarnings(as.numeric(as.character(x)))), check.names = FALSE)
+        sample_names <- sub("_batch_corrected_Protein_group_abundance$", "", abundance_columns)
+        colnames(corrected_abundance) <- sample_names
+        corrected_log2 <- as.data.frame(lapply(corrected_abundance, function(x) log2(x)), check.names = FALSE)
+        feature_column <- resolve_report_feature_col(corrected_table, settings$report_feature_col)
+        features <- if (!is.na(feature_column)) protein_feature_labels(corrected_table, feature_column) else paste0("Feature_", seq_len(nrow(corrected_table)))
+        cached_batch_corrected_s3_result(list(
+          table = corrected_table,
+          expression = data.frame(Feature = make.unique(features), corrected_log2, check.names = FALSE),
+          corrected_log2 = corrected_log2,
+          corrected_abundance = corrected_abundance,
+          prepared = list(sample_map = if (is.null(loaded$batch_corrected_sample_map)) data.frame(Sample = sample_names) else loaded$batch_corrected_sample_map),
+          combat_mode = NA_integer_, correction_method = "Restored project cache"
+        ))
+      }
+    }
+    if (isTRUE(activate_path)) {
+      normalized_path <- normalizePath(path, mustWork = FALSE)
+      active_project_path(normalized_path)
+    }
+    restored_counts <- c(
+      if (!is.null(loaded$metadata)) paste0(nrow(loaded$metadata), " metadata rows") else NULL,
+      if (!is.null(loaded$processed_s2)) paste0(nrow(loaded$processed_s2), " S2 proteins") else NULL,
+      if (!is.null(loaded$processed_s3)) paste0(nrow(loaded$processed_s3), " S3 proteins") else NULL
+    )
+    project_database_message(paste0(
+      "Opened ", toupper(proteomics_project_backend_for_path(path)), " project: ", display_name, ".",
+      if (length(restored_counts)) paste0(" Restored ", paste(restored_counts, collapse = "; "), ".") else " No cached analysis tables were found."
+    ))
+    loaded
+  }
+
+  save_active_project_state <- function(reason = "manual save", include_derived = TRUE, destination = NULL) {
+    path <- if (is.null(destination)) active_project_path() else destination
+    if (is.null(path) || !nzchar(path)) path <- active_project_path_from_input()
+    existing <- if (file.exists(path)) tryCatch(load_proteomics_project_file(path), error = function(e) list()) else list()
+    keep <- function(value, name) {
+      if (is.null(value) || (is.data.frame(value) && nrow(value) == 0)) existing[[name]] else value
+    }
+    metadata <- tryCatch(built_metadata(), error = function(e) NULL)
+    settings_to_save <- project_settings()
+    applied_state <- applied_metadata_state()
+    if (!is.null(applied_state$metadata)) settings_to_save$metadata_export_columns <- applied_state$columns
+    s2 <- if (isTRUE(include_derived)) tryCatch(protein_no_impute_table(), error = function(e) NULL) else NULL
+    s3 <- if (isTRUE(include_derived)) tryCatch(protein_imputed_table(), error = function(e) NULL) else NULL
+    corrected_result <- if (isTRUE(include_derived)) tryCatch(batch_corrected_s3_result(), error = function(e) NULL) else NULL
+    corrected <- if (!is.null(corrected_result)) corrected_result$table else NULL
+    sample_map <- if (!is.null(s3)) attr(s3, "sample_map") else NULL
+    identifications_overview <- tryCatch(
+      project_input_table(project_file("identifications_overview_file"), project_db_cache()$identifications_overview),
+      error = function(e) NULL
+    )
+    run_identifications_precursor <- tryCatch(
+      project_input_table(project_file("run_identifications_precursor_file"), project_db_cache()$run_identifications_precursor),
+      error = function(e) NULL
+    )
+    run_identifications_protein <- tryCatch(
+      project_input_table(project_file("run_identifications_protein_file"), project_db_cache()$run_identifications_protein),
+      error = function(e) NULL
+    )
+    project_name <- project_number_for_downloads()
+    if (is.na(project_name)) project_name <- tools::file_path_sans_ext(basename(path))
+    success <- tryCatch({
+      save_proteomics_project_file(
+        path = path, project_name = project_name, settings = settings_to_save,
+        metadata = keep(metadata, "metadata"), spqc_metadata_edits = spqc_metadata_edits(),
+        source_file_manifest = tryCatch(project_file_status(), error = function(e) existing$source_file_manifest),
+        processed_s2 = keep(s2, "processed_s2"), processed_s3 = keep(s3, "processed_s3"),
+        processed_sample_map = keep(sample_map, "processed_sample_map"),
+        batch_corrected_s3 = keep(corrected, "batch_corrected_s3"),
+        batch_corrected_sample_map = if (!is.null(corrected_result) && !is.null(corrected_result$prepared$sample_map)) corrected_result$prepared$sample_map else existing$batch_corrected_sample_map,
+        statistics_tables = existing$statistics_tables,
+        identifications_overview = keep(identifications_overview, "identifications_overview"),
+        run_identifications_precursor = keep(run_identifications_precursor, "run_identifications_precursor"),
+        run_identifications_protein = keep(run_identifications_protein, "run_identifications_protein")
+      )
+      TRUE
+    }, error = function(e) {
+      active_project_last_error(conditionMessage(e))
+      project_database_message(paste0("Project save failed (", reason, "): ", conditionMessage(e)))
+      showNotification(conditionMessage(e), type = "error")
+      FALSE
+    })
+    if (success) {
+      if (is.null(destination)) active_project_path(normalizePath(path, mustWork = FALSE))
+      active_project_last_saved(Sys.time())
+      active_project_last_error("")
+      project_database_message(paste0("Saved active project (", reason, "): ", normalizePath(path, mustWork = FALSE)))
+    }
+    success
+  }
+
+  autosave_active_project <- function(reason, include_derived = FALSE) {
+    path <- active_project_path()
+    if (!isTRUE(input$autosave_project) || is.null(path) || !nzchar(path)) return(invisible(FALSE))
+    active_project_autosave_pending_reason(reason)
+    active_project_autosave_include_derived(isTRUE(include_derived))
+    active_project_autosave_requested_at(Sys.time())
+    invisible(TRUE)
+  }
+
+  autosave_project_signal <- shiny::debounce(reactive(list(
+    requested_at = active_project_autosave_requested_at(),
+    reason = active_project_autosave_pending_reason(),
+    include_derived = active_project_autosave_include_derived()
+  )), 3000)
+
+  observeEvent(autosave_project_signal(), {
+    signal <- autosave_project_signal()
+    if (is.null(signal$requested_at) || !nzchar(signal$reason)) return()
+    active_project_autosave_pending_reason("")
+    active_project_autosave_include_derived(FALSE)
+    save_active_project_state(signal$reason, include_derived = isTRUE(signal$include_derived))
+  }, ignoreInit = TRUE)
+
+observeEvent(input$project_open_file, {
+  req(input$project_open_file)
+  tryCatch({
+    ext <- tolower(tools::file_ext(input$project_open_file$name))
+    if (!ext %in% c("duckdb", "db", "rds")) stop("Select a DuckDB, DB, or RDS project.", call. = FALSE)
+    extension <- paste0(".", ext)
+    session_path <- tempfile("proteomics_project_", fileext = extension)
+    if (!file.copy(input$project_open_file$datapath, session_path, overwrite = TRUE)) {
+      stop("Could not copy the selected project into this app session.", call. = FALSE)
+    }
+    load_project_into_session(session_path, input$project_open_file$name, TRUE)
+  }, error = function(e) showNotification(conditionMessage(e), type = "error", duration = NULL))
+})
+
+observeEvent(input$create_new_project, {
+  showModal(modalDialog(
+    title = "Create new project",
+    textInput("new_project_filename", "Project filename", value = "proteomics_project.duckdb"),
+    tags$p("The project will be kept in this app session. Use Download copy to save it to your computer."),
+    easyClose = TRUE,
+    footer = tagList(
+      modalButton("Cancel"),
+      actionButton("confirm_create_new_project", "Create project", class = "btn-primary")
+    )
+  ))
+})
+
+observeEvent(input$confirm_create_new_project, {
+  tryCatch({
+    filename <- trimws(as.character(input$new_project_filename)[1L])
+    if (is.na(filename) || !nzchar(filename)) stop("Enter a project filename.", call. = FALSE)
+    filename <- basename(filename)
+    if (!grepl("\\.duckdb$", filename, ignore.case = TRUE)) filename <- paste0(filename, ".duckdb")
+    extension <- ".duckdb"
+    path <- tempfile("proteomics_project_", fileext = extension)
+    removeModal()
+      empty_project <- empty_proteomics_project_payload()
+      do.call(
+        save_proteomics_project_file,
+        c(
+          list(path = path, project_name = tools::file_path_sans_ext(basename(path))),
+          empty_project
+        )
+      )
+      ignored_project_upload_paths(current_project_upload_paths())
+      load_project_into_session(path, filename, TRUE)
+      active_project_last_saved(Sys.time())
+      project_database_message(paste0("Created new session project: ", filename, ". Use Download copy to save it to your computer."))
+      showNotification("Created a new empty project. Previous session data were not copied.", type = "message")
+  }, error = function(e) {
+    active_project_last_error(conditionMessage(e))
+    showNotification(conditionMessage(e), type = "error", duration = NULL)
+  })
+})
+
+observeEvent(input$clear_active_project, {
+  showModal(modalDialog(
+    title = "Clear the active project?",
+    p("This will clear all data, metadata, cached analyses, selections, and the active project from this app session."),
+    p(tags$strong("Unapplied or undownloaded changes will be lost.")),
+    p("No file on your computer will be deleted or modified."),
+    easyClose = TRUE,
+    footer = tagList(
+      modalButton("Cancel"),
+      actionButton("confirm_clear_active_project", "Clear project", class = "btn-danger")
+    )
+  ))
+})
+
+observeEvent(input$confirm_clear_active_project, {
+  removeModal()
+  session$reload()
+})
+
+observeEvent(input$save_active_project, {
+  path <- active_project_path()
+  if (is.null(path) || !length(path) || !nzchar(path)) {
+    showNotification("Open or create a project first.", type = "warning")
+    return()
+  }
+  if (!identical(metadata_apply_message(), "All metadata changes applied.")) {
+    showNotification("Saving the last applied metadata; draft metadata changes are not included.", type = "warning")
+  }
+  save_active_project_state("manual save", include_derived = TRUE)
+})
+
+  observeEvent(input$apply_metadata_replacement, {
+    req(input$metadata_replacement_file)
+    tryCatch({
+      current <- draft_metadata()
+      replacement <- read_uploaded_table(input$metadata_replacement_file)
+      replacement <- validate_proteomics_metadata_replacement(replacement, current$Sample)
+      replacement_layers <- prepare_proteomics_metadata_replacement(replacement)
+      replacement <- replacement_layers$metadata
+      spqc_metadata_draft_edits(replacement_layers$spqc_metadata_edits)
+      active_metadata_override(replacement)
+      metadata_replacement_message(paste0(
+        "Loaded ", nrow(replacement), " metadata rows from ", input$metadata_replacement_file$name,
+        " into the draft. Click Apply metadata changes to update subsequent tabs."
+      ))
+      metadata_apply_message("Unapplied metadata changes.")
+      showNotification("Modified metadata loaded into the draft.", type = "message")
+    }, error = function(e) {
+      metadata_replacement_message(paste0("Metadata replacement failed: ", conditionMessage(e)))
+      showNotification(conditionMessage(e), type = "error")
+    })
+  })
+
+  observeEvent(input$run_batch_correction, {
+    autosave_active_project("batch correction", include_derived = TRUE)
+  }, ignoreInit = TRUE)
+
+  output$project_status <- renderText({
+    cache <- project_db_cache()
+    paste(
+      project_database_message(),
+      paste0("Active project: ", if (nzchar(active_project_display_name())) active_project_display_name() else "none"),
+      paste0("Last saved: ", if (is.null(active_project_last_saved())) "not saved this session" else format(active_project_last_saved(), "%Y-%m-%d %H:%M:%S")),
+      paste0("Restored metadata rows: ", if (is.null(cache$metadata)) 0 else nrow(cache$metadata)),
+      paste0("Restored S2 proteins: ", if (is.null(cache$processed_s2)) 0 else nrow(cache$processed_s2)),
+      paste0("Restored S3 proteins: ", if (is.null(cache$processed_s3)) 0 else nrow(cache$processed_s3)),
+      if (nzchar(active_project_last_error())) paste0("Last error: ", active_project_last_error()) else NULL,
+      sep = "\n"
+    )
+  })
+
+  output$download_project_duckdb <- downloadHandler(
+    filename = function() {
+      name <- active_project_display_name()
+      if (is.null(name) || !length(name) || !nzchar(name)) {
+        paste0("proteomics_project_", format(Sys.Date(), "%m%d%y"), ".duckdb")
+      } else {
+        paste0(tools::file_path_sans_ext(basename(name)), ".duckdb")
+      }
+    },
+    content = function(file) validate(need(save_active_project_state("download", include_derived = TRUE, destination = file), "Could not create DuckDB project download."))
+  )
 
   condition_setup_template <- reactive({
     if (is.null(project_file("condition_setup_template_file"))) return(NULL)
@@ -2666,12 +3399,10 @@ server <- function(input, output, session) {
     switch(
       pca_source,
       "imputed" = {
-        req(project_file("protein_imputed_file"))
-        read_uploaded_table(project_file("protein_imputed_file"))
+        protein_source_table("imputed")
       },
       "no_impute" = {
-        req(project_file("protein_no_impute_file"))
-        read_uploaded_table(project_file("protein_no_impute_file"))
+        protein_source_table("no_impute")
       },
       "custom" = {
         req(project_file("data_file"))
@@ -2681,7 +3412,7 @@ server <- function(input, output, session) {
   })
 
   report_quantity_columns <- reactive({
-    grep("\\.PG\\.Quantity$", colnames(raw_data()), value = TRUE)
+    proteomics_abundance_columns(raw_data())
   })
 
   use_report_layout <- reactive({
@@ -2732,11 +3463,18 @@ server <- function(input, output, session) {
   }
 
   metadata_for_exclusion_matching <- function() {
-    if (!is.null(project_file("meta_file")) || !is.null(project_file("run_order_file")) || !is.null(project_file("sample_details_file"))) {
+    if (!is.null(project_db_cache()$metadata) || !is.null(project_file("meta_file")) || !is.null(project_file("run_order_file")) || !is.null(project_file("sample_details_file"))) {
       built_metadata()
     } else {
       NULL
     }
+  }
+
+  protein_sample_names_for_table <- function(table, abundance_columns) {
+    md <- tryCatch(built_metadata(), error = function(e) NULL)
+    if (is.null(md) || !"Sample" %in% colnames(md)) return(proteomics_abundance_sample_names(abundance_columns))
+    header_labels <- protein_header_labels_from_metadata(md, input$protein_header_label_columns)
+    restore_proteomics_sample_names(abundance_columns, md$Sample, header_labels)
   }
 
   expression_data <- reactive({
@@ -2753,8 +3491,7 @@ server <- function(input, output, session) {
 
       mat_df <- df[, quantity_cols, drop = FALSE]
       mat_df[] <- lapply(mat_df, function(x) suppressWarnings(as.numeric(as.character(x))))
-      sample_names <- sub("^\\[[0-9]+\\][[:space:]]*", "", quantity_cols)
-      sample_names <- sub("\\.PG\\.Quantity$", "", sample_names)
+      sample_names <- protein_sample_names_for_table(df, quantity_cols)
       colnames(mat_df) <- make.unique(sample_names)
       mat_df <- filter_expression_columns_by_exclusion(
         data.frame(Feature = seq_len(nrow(mat_df)), mat_df, check.names = FALSE),
@@ -2797,19 +3534,16 @@ server <- function(input, output, session) {
     if (identical(source, "S3_batch_corrected")) {
       return(filter_expression_columns_by_exclusion(batch_corrected_s3_expression_data(), input$sample_exclusions_text, metadata_for_exclusion_matching()))
     }
-    file_info <- if (identical(source, "no_impute")) project_file("protein_no_impute_file") else project_file("protein_imputed_file")
-    req(file_info)
-    df <- read_uploaded_table(file_info)
-    quantity_cols <- grep("\\.PG\\.Quantity$", colnames(df), value = TRUE)
-    validate(need(length(quantity_cols) >= 3, "Protein report requires at least 3 .PG.Quantity sample columns."))
+    df <- protein_source_table(source)
+    quantity_cols <- proteomics_abundance_columns(df)
+    validate(need(length(quantity_cols) >= 3, "Protein report requires at least 3 abundance sample columns."))
 
     feature_col <- resolve_report_feature_col(df, input$report_feature_col)
     validate(need(!is.na(feature_col), "No feature identifier column found in the report."))
 
     mat_df <- df[, quantity_cols, drop = FALSE]
     mat_df[] <- lapply(mat_df, function(x) suppressWarnings(as.numeric(as.character(x))))
-    sample_names <- sub("^\\[[0-9]+\\][[:space:]]*", "", quantity_cols)
-    sample_names <- sub("\\.PG\\.Quantity$", "", sample_names)
+    sample_names <- protein_sample_names_for_table(df, quantity_cols)
     colnames(mat_df) <- make.unique(sample_names)
     mat_df <- filter_expression_columns_by_exclusion(
       data.frame(Feature = seq_len(nrow(mat_df)), mat_df, check.names = FALSE),
@@ -2842,12 +3576,10 @@ server <- function(input, output, session) {
       }
       return(out)
     }
-    file_info <- if (identical(source, "no_impute") || identical(source, "S2")) project_file("protein_no_impute_file") else project_file("protein_imputed_file")
-    req(file_info)
-    df <- read_uploaded_table(file_info)
+    df <- protein_source_table(source)
     feature_col <- resolve_report_feature_col(df, feature_col_requested)
     validate(need(!is.na(feature_col), "No feature identifier column found in the protein report."))
-    quantity_cols <- grep("\\.PG\\.Quantity$", colnames(df), value = TRUE)
+    quantity_cols <- proteomics_abundance_columns(df)
     mat_df <- df[, quantity_cols, drop = FALSE]
     mat_df[] <- lapply(mat_df, function(x) suppressWarnings(as.numeric(as.character(x))))
     keep_rows <- rowSums(!is.na(mat_df)) > 0
@@ -2864,14 +3596,50 @@ server <- function(input, output, session) {
     out
   }
 
+  compact_choice_text <- function(values, max_chars = 90) {
+    values <- unique(trimws(as.character(values)))
+    values <- values[!is.na(values) & nzchar(values)]
+    if (!length(values)) return(character(0))
+    text <- paste(values, collapse = "; ")
+    if (nchar(text) > max_chars) paste0(substr(text, 1, max_chars - 3), "...") else text
+  }
+
+  protein_feature_choices <- function(source, expr = NULL) {
+    features <- if (!is.null(expr) && "Feature" %in% colnames(expr)) {
+      as.character(expr$Feature)
+    } else {
+      as.character(protein_info_for_source(source, input$report_feature_col)$Protein)
+    }
+    features <- features[!is.na(features) & nzchar(features)]
+    if (!length(features)) return(stats::setNames(character(0), character(0)))
+
+    info <- tryCatch(protein_info_for_source(source, input$report_feature_col), error = function(e) NULL)
+    if (is.null(info) || !"Protein" %in% colnames(info)) {
+      return(stats::setNames(features, features))
+    }
+    info <- info[match(features, as.character(info$Protein)), , drop = FALSE]
+    label_columns <- intersect(
+      c("PG.Genes", "PG.ProteinGroups", "PG.ProteinNames", "PG.ProteinDescriptions", "RawFeatureID"),
+      colnames(info)
+    )
+    labels <- vapply(seq_along(features), function(index) {
+      parts <- c(features[index])
+      for (column_name in label_columns) {
+        value <- compact_choice_text(info[[column_name]][index])
+        if (length(value) && !identical(value, features[index])) parts <- c(parts, value)
+      }
+      paste(unique(parts), collapse = " | ")
+    }, character(1))
+    stats::setNames(features, labels)
+  }
+
   sample_metadata_for_plotting <- function(samples) {
-    md <- if (!is.null(project_file("meta_file")) || !is.null(project_file("run_order_file")) || !is.null(project_file("sample_details_file"))) {
+    md <- if (!is.null(project_db_cache()$metadata) || !is.null(project_file("meta_file")) || !is.null(project_file("run_order_file")) || !is.null(project_file("sample_details_file"))) {
       active_metadata()
     } else {
       data.frame(Sample = samples, stringsAsFactors = FALSE)
     }
-    out <- data.frame(Sample = samples, stringsAsFactors = FALSE) %>%
-      left_join(md, by = "Sample")
+    out <- unique_sample_metadata(md, samples)
     if (!"Condition" %in% colnames(out)) out$Condition <- "All"
     if (!"Replicate" %in% colnames(out)) out$Replicate <- seq_len(nrow(out))
     if (!"AnalysisLabel" %in% colnames(out)) out$AnalysisLabel <- out$Sample
@@ -2879,7 +3647,7 @@ server <- function(input, output, session) {
   }
 
   active_metadata <- reactive({
-    md <- built_metadata()
+    md <- normalize_proteomics_metadata(built_metadata())
     if (!"Excluded" %in% colnames(md)) return(md)
     excluded <- as.logical(md$Excluded)
     excluded[is.na(excluded)] <- FALSE
@@ -2927,9 +3695,21 @@ server <- function(input, output, session) {
     colnames(md)[1]
   }
 
-  built_metadata <- reactive({
+  draft_metadata <- reactive({
     sample_details_used_as_basis <- FALSE
-    if (!is.null(project_file("meta_file"))) {
+    replacement_override <- active_metadata_override()
+    cache <- project_db_cache()
+    metadata_sources <- c("meta_file", "run_order_file", "sample_details_file")
+    uploaded_metadata <- vapply(metadata_sources, function(id) !is.null(project_file(id)), logical(1))
+    used_cached_overlay <- !is.null(cache$metadata) || !is.null(replacement_override)
+    if (!is.null(replacement_override)) {
+      built <- as.data.frame(replacement_override, stringsAsFactors = FALSE, check.names = FALSE)
+    } else if (used_cached_overlay) {
+      built <- as.data.frame(cache$metadata, stringsAsFactors = FALSE, check.names = FALSE)
+      if (uploaded_metadata[["meta_file"]]) built <- merge_proteomics_metadata_replacement(built, metadata_df(), "meta_file")
+      if (uploaded_metadata[["run_order_file"]]) built <- merge_proteomics_metadata_replacement(built, run_order_df(), "run_order_file")
+      if (uploaded_metadata[["sample_details_file"]]) built <- merge_proteomics_metadata_replacement(built, sample_details_df(), "sample_details_file")
+    } else if (!is.null(project_file("meta_file"))) {
       md <- metadata_df()
       id_col <- resolve_metadata_sample_id_col(md, input$sample_id_col)
       validate(need(id_col %in% colnames(md), paste0("Metadata sample ID column not found: ", id_col)))
@@ -2950,7 +3730,7 @@ server <- function(input, output, session) {
       built$SampleDetailsID <- detected_sample_details_id
     }
 
-    if (!is.null(project_file("run_order_file"))) {
+    if (!used_cached_overlay && !is.null(project_file("run_order_file"))) {
       run_order <- run_order_df()
       validate(need(all(c("Run Label", "#") %in% colnames(run_order)), "Run-order table must contain 'Run Label' and '#' columns."))
       validate(need(!anyDuplicated(run_order$`Run Label`), "Run-order table contains duplicate Run Label values."))
@@ -2972,7 +3752,7 @@ server <- function(input, output, session) {
       }
     }
 
-    if (!is.null(project_file("sample_details_file")) && !isTRUE(sample_details_used_as_basis)) {
+    if (!used_cached_overlay && !is.null(project_file("sample_details_file")) && !isTRUE(sample_details_used_as_basis)) {
       built <- built %>% left_join(sample_details_df(), by = "SampleDetailsID")
       for (column in colnames(built)[grepl("\\.x$", colnames(built))]) {
         base_column <- sub("\\.x$", "", column)
@@ -2998,7 +3778,7 @@ server <- function(input, output, session) {
         built$Group <- fill_missing_metadata_values(if ("Group" %in% colnames(built)) built$Group else NULL, built[[group_col]])
         built$Condition <- fill_missing_metadata_values(if ("Condition" %in% colnames(built)) built$Condition else NULL, built[[group_col]])
       }
-    } else {
+    } else if (!used_cached_overlay) {
       built$SampleName <- NA_character_
     }
 
@@ -3053,6 +3833,9 @@ server <- function(input, output, session) {
       }
     }
 
+    committed_spqc_edits <- if (isTRUE(spqc_clear_pending())) empty_spqc_metadata_edits() else spqc_metadata_edits()
+    built <- apply_proteomics_metadata_cell_edits(built, committed_spqc_edits)
+
     condition <- if ("Condition" %in% colnames(built)) as.character(built$Condition) else rep("", nrow(built))
     replicate <- if ("Replicate" %in% colnames(built)) as.character(built$Replicate) else rep("", nrow(built))
     label_value <- ifelse(!is.na(built$SampleName) & built$SampleName != "", built$SampleName, replicate)
@@ -3069,6 +3852,13 @@ server <- function(input, output, session) {
     built
   })
 
+  built_metadata <- reactive({
+    metadata_apply_revision()
+    state <- applied_metadata_state()
+    validate(need(!is.null(state$metadata), "Apply metadata changes on the Make metadata tab first."))
+    state$metadata
+  })
+
   metadata_default_columns <- function(columns) {
     preferred <- c(
       "RunOrder", "SampleName", "Condition", "Group", "Batch", "AnalysisLabel", "Excluded", "ExclusionReason", "Run Label",
@@ -3078,6 +3868,7 @@ server <- function(input, output, session) {
   }
 
   update_protein_header_label_columns <- function(columns, saved_selected = NULL) {
+    columns <- table_s1_metadata_choices(columns, downstream_metadata_columns())
     preferred <- c("Condition", "SampleName", "Replicate", "AnalysisLabel", "Run Label", "Sample")
     choices <- unique(c(preferred[preferred %in% columns], columns))
     current <- isolate(input$protein_header_label_columns)
@@ -3091,7 +3882,7 @@ server <- function(input, output, session) {
       } else if ("AnalysisLabel" %in% choices) {
         "AnalysisLabel"
       } else {
-        "Sample"
+        character(0)
       }
     }
     updateSelectizeInput(
@@ -3103,39 +3894,75 @@ server <- function(input, output, session) {
     )
   }
 
-  observeEvent(built_metadata(), {
-    columns <- colnames(built_metadata())
+  update_protein_quantity_order_columns <- function(columns, saved_selected = NULL, prefer_saved = FALSE) {
+    columns <- table_s1_metadata_choices(columns, downstream_metadata_columns())
+    choices <- setdiff(columns, c("SampleDetailsID", "Excluded", "ExclusionReason"))
+    current <- isolate(input$protein_quantity_order_columns)
+    selected <- current[current %in% choices]
+    saved_selected <- unlist(saved_selected, use.names = FALSE)
+    saved_selected <- saved_selected[saved_selected %in% choices]
+    if (isTRUE(prefer_saved) && length(saved_selected) > 0) selected <- saved_selected
+    if (length(selected) == 0 && length(saved_selected) > 0) selected <- saved_selected
+    if (length(selected) == 0) {
+      defaults <- c("Condition", "Batch", "Replicate", "RunOrder")
+      selected <- defaults[defaults %in% choices]
+    }
+    updateSelectizeInput(
+      session,
+      "protein_quantity_order_columns",
+      choices = choices,
+      selected = selected,
+      server = TRUE
+    )
+  }
+
+observeEvent(draft_metadata(), {
+  columns <- colnames(draft_metadata())
     current <- isolate(input$metadata_export_columns)
     selected <- current[current %in% columns]
-    if (length(selected) == 0) selected <- metadata_default_columns(columns)
+    saved <- unlist(restored_project_settings()$metadata_export_columns, use.names = FALSE)
+    saved <- saved[saved %in% columns]
+    if (is.null(current) && length(saved) > 0) selected <- saved
+    if (is.null(current) && length(selected) == 0) selected <- metadata_default_columns(columns)
     updateSelectizeInput(
       session,
       "metadata_export_columns",
       choices = columns,
       selected = selected,
-      server = TRUE
+      server = FALSE
     )
-  }, ignoreInit = FALSE)
+}, ignoreInit = FALSE)
 
-  observeEvent(built_metadata(), {
-    columns <- colnames(built_metadata())
+  downstream_metadata_columns <- reactive({
+    state <- applied_metadata_state()
+    validate(need(!is.null(state$metadata), "Apply metadata changes on the Make metadata tab first."))
+    table_s1_metadata_choices(colnames(state$metadata), state$columns)
+  })
+
+  scoped_metadata_columns <- function(md) {
+    table_s1_metadata_choices(colnames(md), downstream_metadata_columns())
+  }
+
+  observeEvent(list(built_metadata(), downstream_metadata_columns()), {
+    columns <- downstream_metadata_columns()
     update_protein_header_label_columns(columns, restored_project_settings()$protein_header_label_columns)
+    update_protein_quantity_order_columns(columns, restored_project_settings()$protein_quantity_order_columns)
   }, ignoreInit = FALSE)
 
   observeEvent(input$reset_metadata_columns, {
-    columns <- colnames(built_metadata())
+    columns <- colnames(draft_metadata())
     updateSelectizeInput(
       session,
       "metadata_export_columns",
       choices = columns,
       selected = metadata_default_columns(columns),
-      server = TRUE
+      server = FALSE
     )
   })
 
   exported_metadata <- reactive({
     built <- built_metadata()
-    selected <- input$metadata_export_columns
+    selected <- applied_metadata_state()$columns
     validate(need(length(selected) > 0, "Select at least one column for Table S1. Metadata."))
     selected <- selected[selected %in% colnames(built)]
     validate(need(length(selected) > 0, "No selected columns are available in the built metadata."))
@@ -3146,10 +3973,33 @@ server <- function(input, output, session) {
     built[, selected, drop = FALSE]
   })
 
-  update_protein_condition_controls <- function(saved_settings = list()) {
+  draft_exported_metadata <- reactive({
+    built <- draft_metadata()
+    built <- apply_proteomics_metadata_cell_edits(built, spqc_metadata_draft_edits())
+    selected <- input$metadata_export_columns
+    validate(need(length(selected) > 0, "Select at least one column for Table S1. Metadata."))
+    selected <- selected[selected %in% colnames(built)]
+    validate(need(length(selected) > 0, "No selected columns are available in the draft metadata."))
+    if ("RunOrder" %in% colnames(built)) built <- built %>% arrange(is.na(RunOrder), RunOrder)
+    built[, selected, drop = FALSE]
+  })
+
+  update_protein_condition_controls <- function(saved_settings = list(), update_group_selector = TRUE, prefer_saved_pair = FALSE) {
     md <- active_metadata()
-    if (!"Condition" %in% colnames(md)) return()
-    conditions <- unique(as.character(md$Condition[!is.na(md$Condition) & md$Condition != ""]))
+    pair_choices <- scoped_metadata_columns(md)
+    current_pair <- isolate(input$stats_pair_col)
+    saved_pair <- unlist(saved_settings$stats_pair_col, use.names = FALSE)
+    selected_pair <- retain_metadata_choice(if (isTRUE(prefer_saved_pair) && length(saved_pair)) saved_pair else current_pair, pair_choices, c(saved_pair, "Replicate"))
+    updateSelectInput(session, "stats_pair_col", choices = c("Select pairing field..." = "", stats::setNames(pair_choices, pair_choices)), selected = selected_pair)
+    cv_group_columns <- table_s1_metadata_choices(cv_metadata_group_columns(md), downstream_metadata_columns())
+    current_cv_group_col <- isolate(input$protein_cv_group_col)
+    saved_cv_group_col <- as.character(saved_settings$protein_cv_group_col)[1L]
+    selected_cv_group_col <- retain_metadata_choice(current_cv_group_col, cv_group_columns, c(saved_cv_group_col, "Condition"))
+    updateSelectInput(session, "protein_cv_group_col", choices = stats::setNames(cv_group_columns, cv_group_columns), selected = selected_cv_group_col)
+    conditions <- if (length(selected_cv_group_col) && nzchar(selected_cv_group_col) && selected_cv_group_col %in% colnames(md)) {
+      values <- trimws(as.character(md[[selected_cv_group_col]]))
+      sort(unique(values[!is.na(values) & nzchar(values)]))
+    } else character(0)
     current <- isolate(input$cv_conditions)
     selected <- current[current %in% conditions]
     saved_cv <- unlist(saved_settings$cv_conditions, use.names = FALSE)
@@ -3160,24 +4010,51 @@ server <- function(input, output, session) {
       if (length(spqc_conditions) > 0) selected <- spqc_conditions
     }
     updateSelectizeInput(session, "cv_conditions", choices = conditions, selected = selected, server = FALSE)
-    stats_conditions <- conditions[!grepl("SPQC", conditions, ignore.case = TRUE)]
-    if (length(stats_conditions) == 0) stats_conditions <- conditions
-    comparison_ids <- unlist(lapply(stats_conditions, function(numerator) {
-      paste(numerator, stats_conditions[stats_conditions != numerator], sep = "|||")
+    candidate_columns <- table_s1_metadata_choices(stats_metadata_group_columns(md), downstream_metadata_columns())
+    current_group_columns <- isolate(input$stats_group_columns)
+    selected_group_columns <- current_group_columns[current_group_columns %in% candidate_columns]
+    saved_group_columns <- unlist(saved_settings$stats_group_columns, use.names = FALSE)
+    saved_group_columns <- saved_group_columns[saved_group_columns %in% candidate_columns]
+    if (is.null(current_group_columns) && !length(selected_group_columns)) selected_group_columns <- saved_group_columns
+    if (isTRUE(update_group_selector)) {
+      updateSelectizeInput(session, "stats_group_columns", choices = candidate_columns, selected = selected_group_columns, server = FALSE)
+    }
+
+    comparison_ids <- unlist(lapply(selected_group_columns, function(group_col) {
+      group_values <- unique(trimws(as.character(md[[group_col]])))
+      group_values <- group_values[!is.na(group_values) & nzchar(group_values) & !grepl("SPQC", group_values, ignore.case = TRUE)]
+      if (length(group_values) < 2L) return(character(0))
+      unlist(lapply(group_values, function(numerator) {
+        vapply(group_values[group_values != numerator], function(denominator) make_stats_comparison_id(group_col, numerator, denominator), character(1))
+      }))
     }))
-    comparison_labels <- sub("\\|\\|\\|", " vs ", comparison_ids)
-    comparison_choices <- stats::setNames(comparison_ids, comparison_labels)
-    current_comparisons <- isolate(input$stats_comparisons)
-    chosen <- current_comparisons[current_comparisons %in% comparison_ids]
+    current_comparisons <- as.character(isolate(input$stats_comparisons))
     saved_comparisons <- unlist(saved_settings$stats_comparisons, use.names = FALSE)
+    legacy_comparisons <- unique(c(current_comparisons, saved_comparisons))
+    legacy_comparisons <- legacy_comparisons[vapply(legacy_comparisons, function(value) {
+      parsed <- tryCatch(parse_stats_comparison_id(value), error = function(e) NULL)
+      if (is.null(parsed) || !isTRUE(parsed$legacy) || !"Condition" %in% selected_group_columns) return(FALSE)
+      parsed$numerator %in% as.character(md$Condition) && parsed$denominator %in% as.character(md$Condition)
+    }, logical(1))]
+    if (length(legacy_comparisons)) {
+      legacy_new_ids <- vapply(legacy_comparisons, function(value) {
+        parsed <- parse_stats_comparison_id(value)
+        make_stats_comparison_id("Condition", parsed$numerator, parsed$denominator)
+      }, character(1))
+      for (i in seq_along(legacy_comparisons)) comparison_ids[comparison_ids == legacy_new_ids[[i]]] <- legacy_comparisons[[i]]
+    }
+    comparison_ids <- unique(as.character(comparison_ids))
+    comparison_labels <- vapply(comparison_ids, stats_comparison_label, character(1))
+    comparison_choices <- stats::setNames(comparison_ids, comparison_labels)
+    chosen <- current_comparisons[current_comparisons %in% comparison_ids]
     saved_comparisons <- saved_comparisons[saved_comparisons %in% comparison_ids]
     if (length(chosen) == 0 && length(saved_comparisons) > 0) chosen <- saved_comparisons
     if (length(chosen) == 0) {
-      defaults <- c("CKDu|||CKD", "CKD|||Control", "CKDu|||Control")
+      defaults <- c("Condition|||CKDu|||CKD", "Condition|||CKD|||Control", "Condition|||CKDu|||Control")
       chosen <- defaults[defaults %in% comparison_ids]
       if (length(chosen) == 0 && length(comparison_ids) > 0) chosen <- comparison_ids[1]
     }
-    updateSelectizeInput(session, "stats_comparisons", choices = comparison_choices, selected = chosen, server = FALSE)
+    updateSelectizeInput(session, "stats_comparisons", choices = comparison_choices, selected = chosen, server = TRUE)
     paired_current <- isolate(input$stats_paired_comparisons)
     paired_selected <- paired_current[paired_current %in% chosen]
     saved_paired <- unlist(saved_settings$stats_paired_comparisons, use.names = FALSE)
@@ -3186,20 +4063,36 @@ server <- function(input, output, session) {
     updateSelectizeInput(
       session,
       "stats_paired_comparisons",
-      choices = stats::setNames(chosen, sub("\\|\\|\\|", " vs ", chosen)),
+      choices = stats::setNames(chosen, vapply(chosen, stats_comparison_label, character(1))),
       selected = paired_selected,
       server = FALSE
     )
   }
 
-  observeEvent(built_metadata(), {
+  observeEvent(list(built_metadata(), downstream_metadata_columns()), {
     update_protein_condition_controls(restored_project_settings())
   }, ignoreInit = FALSE)
+
+  observeEvent(list(built_metadata(), downstream_metadata_columns()), {
+    choices <- table_s1_metadata_choices(cv_metadata_group_columns(active_metadata()), downstream_metadata_columns())
+    current <- isolate(input$cv_plot_group_col)
+    saved <- as.character(restored_project_settings()$cv_plot_group_col)[1L]
+    selected <- retain_metadata_choice(current, choices, c(saved, "Condition"))
+    updateSelectInput(session, "cv_plot_group_col", choices = c("Select grouping field..." = "", stats::setNames(choices, choices)), selected = selected)
+  }, ignoreInit = FALSE)
+
+  observeEvent(input$stats_group_columns, {
+    update_protein_condition_controls(restored_project_settings(), update_group_selector = FALSE)
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$protein_cv_group_col, {
+    update_protein_condition_controls(restored_project_settings())
+  }, ignoreInit = TRUE)
 
   observeEvent(input$stats_comparisons, {
     comparisons <- input$stats_comparisons
     if (is.null(comparisons)) comparisons <- character(0)
-    labels <- sub("\\|\\|\\|", " vs ", comparisons)
+    labels <- vapply(comparisons, stats_comparison_label, character(1))
     current <- isolate(input$stats_paired_comparisons)
     selected <- current[current %in% comparisons]
     updateSelectizeInput(
@@ -3211,11 +4104,12 @@ server <- function(input, output, session) {
     )
   }, ignoreInit = FALSE)
 
+  protein_non_data_columns_from_table <- function(report) {
+    proteomics_annotation_columns(colnames(report))
+  }
+
   protein_non_data_columns <- function(file_info) {
-    report <- read_uploaded_table(file_info)
-    names_without_index <- sub("^\\[[0-9]+\\][[:space:]]*", "", colnames(report))
-    measurement <- grepl("\\.PG\\.NrOfPrecursorsUsedForQuantification$|\\.PG\\.Quantity$", names_without_index)
-    colnames(report)[!measurement]
+    protein_non_data_columns_from_table(read_uploaded_table(file_info))
   }
 
   observeEvent(list(imported_project_files(), input$protein_no_impute_file), {
@@ -3237,17 +4131,15 @@ server <- function(input, output, session) {
   }, ignoreInit = TRUE)
 
   sync_protein_non_data_inputs <- function() {
-    no_impute_file <- isolate(project_file("protein_no_impute_file"))
-    imputed_file <- isolate(project_file("protein_imputed_file"))
-    if (!is.null(no_impute_file)) {
-      columns <- protein_non_data_columns(no_impute_file)
+    if (isolate(protein_source_available("no_impute"))) {
+      columns <- protein_non_data_columns_from_table(isolate(protein_source_table("no_impute")))
       current <- isolate(input$s2_non_data_columns)
       selected <- current[current %in% columns]
       if (length(selected) == 0) selected <- columns
       updateSelectizeInput(session, "s2_non_data_columns", choices = columns, selected = selected, server = TRUE)
     }
-    if (!is.null(imputed_file)) {
-      columns <- protein_non_data_columns(imputed_file)
+    if (isolate(protein_source_available("imputed"))) {
+      columns <- protein_non_data_columns_from_table(isolate(protein_source_table("imputed")))
       current <- isolate(input$s3_non_data_columns)
       selected <- current[current %in% columns]
       if (length(selected) == 0) selected <- columns
@@ -3255,34 +4147,38 @@ server <- function(input, output, session) {
     }
   }
 
-  sync_metadata_column_inputs <- function() {
+  sync_metadata_column_inputs <- function(settings = list(), prefer_saved = FALSE) {
     built <- built_metadata()
     columns <- colnames(built)
     current_metadata <- isolate(input$metadata_export_columns)
     selected_metadata <- current_metadata[current_metadata %in% columns]
-    if (length(selected_metadata) == 0) selected_metadata <- metadata_default_columns(columns)
-    updateSelectizeInput(session, "metadata_export_columns", choices = columns, selected = selected_metadata, server = TRUE)
+    saved_metadata <- unlist(settings$metadata_export_columns, use.names = FALSE)
+    saved_metadata <- saved_metadata[saved_metadata %in% columns]
+    if (isTRUE(prefer_saved) && length(saved_metadata) > 0) selected_metadata <- saved_metadata
+    if (is.null(current_metadata) && length(selected_metadata) == 0) selected_metadata <- metadata_default_columns(columns)
+    updateSelectizeInput(session, "metadata_export_columns", choices = columns, selected = selected_metadata, server = FALSE)
 
-    update_protein_header_label_columns(columns, restored_project_settings()$protein_header_label_columns)
+    update_protein_header_label_columns(columns, settings$protein_header_label_columns)
+    update_protein_quantity_order_columns(columns, settings$protein_quantity_order_columns, prefer_saved = prefer_saved)
   }
 
-  sync_condition_dependent_inputs <- function(settings = list()) {
-    update_protein_condition_controls(settings)
+  sync_condition_dependent_inputs <- function(settings = list(), prefer_saved_pair = FALSE) {
+    update_protein_condition_controls(settings, prefer_saved_pair = prefer_saved_pair)
   }
 
   sync_restored_project_inputs <- function(settings = list()) {
     try(restore_project_settings(settings), silent = TRUE)
-    try(sync_metadata_column_inputs(), silent = TRUE)
-    try(sync_condition_dependent_inputs(settings), silent = TRUE)
+    try(sync_metadata_column_inputs(settings, prefer_saved = TRUE), silent = TRUE)
+    try(sync_condition_dependent_inputs(settings, prefer_saved_pair = TRUE), silent = TRUE)
     try(sync_protein_non_data_inputs(), silent = TRUE)
   }
 
   refresh_restored_project_controls <- function(settings = restored_project_settings()) {
     sync_restored_project_inputs(settings)
     session$onFlushed(function() {
-      sync_restored_project_inputs(settings)
+      isolate(sync_restored_project_inputs(settings))
       session$onFlushed(function() {
-        sync_restored_project_inputs(settings)
+        isolate(sync_restored_project_inputs(settings))
       }, once = TRUE)
     }, once = TRUE)
   }
@@ -3296,8 +4192,62 @@ server <- function(input, output, session) {
     project_bundle_message(paste0(project_bundle_message(), "\nRefreshed restored project controls."))
   })
 
+  observeEvent(input$workflow_tabs, {
+    if (!identical(input$workflow_tabs, "Protein tables")) return()
+    settings <- restored_project_settings()
+    update_protein_header_label_columns(downstream_metadata_columns(), settings$protein_header_label_columns)
+    update_protein_quantity_order_columns(downstream_metadata_columns(), settings$protein_quantity_order_columns)
+    sync_condition_dependent_inputs(settings)
+    session$onFlushed(function() {
+      isolate(update_protein_header_label_columns(downstream_metadata_columns(), settings$protein_header_label_columns))
+      isolate(update_protein_quantity_order_columns(downstream_metadata_columns(), settings$protein_quantity_order_columns))
+      isolate(sync_condition_dependent_inputs(settings))
+    }, once = TRUE)
+  }, ignoreInit = TRUE)
+
+  metadata_sorted_samples <- function(md, order_columns) {
+    order_columns <- order_columns[order_columns %in% colnames(md)]
+    if (length(order_columns) == 0) return(character(0))
+    sortable <- md
+    sortable$.input_order <- seq_len(nrow(sortable))
+    order_args <- lapply(order_columns, function(column_name) {
+      values <- sortable[[column_name]]
+      numeric_values <- suppressWarnings(as.numeric(as.character(values)))
+      finite_count <- sum(is.finite(numeric_values))
+      if (finite_count >= max(2, floor(0.8 * length(values)))) {
+        numeric_values[!is.finite(numeric_values)] <- Inf
+        numeric_values
+      } else {
+        text_values <- as.character(values)
+        text_values[is.na(text_values) | !nzchar(text_values)] <- "zzzz_missing"
+        text_values
+      }
+    })
+    order_index <- do.call(order, c(order_args, list(sortable$.input_order, na.last = TRUE)))
+    as.character(sortable$Sample[order_index])
+  }
+
+  reorder_batch_corrected_protein_table <- function(table, sample_map, suffix = "_batch_corrected_Protein_group_abundance") {
+    sample_order <- metadata_sorted_samples(active_metadata(), input$protein_quantity_order_columns)
+    if (length(sample_order) == 0 || is.null(sample_map) || nrow(sample_map) == 0) return(table)
+    sample_map <- sample_map[match(sample_order, sample_map$Sample), , drop = FALSE]
+    sample_map <- sample_map[!is.na(sample_map$Sample), , drop = FALSE]
+    ordered_abundance <- paste0(sample_map$HeaderLabel, suffix)
+    ordered_abundance <- ordered_abundance[ordered_abundance %in% colnames(table)]
+    if (length(ordered_abundance) == 0) return(table)
+    all_abundance <- colnames(table)[endsWith(colnames(table), suffix)]
+    derived_cols <- grep("(_percent_CV|_log2_fold_change|_(paired|unpaired)_t_test_p_value|_BH_FDR)$", colnames(table), value = TRUE)
+    info_cols <- setdiff(colnames(table), c(all_abundance, derived_cols))
+    table[, c(info_cols, ordered_abundance, derived_cols), drop = FALSE]
+  }
+
   renamed_protein_table <- function(file_info, add_stats = FALSE, selected_non_data = NULL) {
-    report <- read_uploaded_table(file_info)
+    if (isTRUE(add_stats)) protein_stats_refresh_revision()
+    report <- if (is.data.frame(file_info)) {
+      as.data.frame(file_info, stringsAsFactors = FALSE, check.names = FALSE)
+    } else {
+      read_uploaded_table(file_info)
+    }
     md <- active_metadata()
     validate(need("Sample" %in% colnames(md), "Build metadata before adding protein tables."))
     validate(need(!anyDuplicated(md$Sample), "Metadata Run Label values must be unique before renaming protein columns."))
@@ -3353,41 +4303,67 @@ server <- function(input, output, session) {
     )))
 
     label_by_run <- setNames(header_labels, as.character(md$Sample))
-    original_names <- colnames(report)
+    original_names <- normalize_proteomics_text(colnames(report))
+    validate(need(!anyDuplicated(original_names), "Protein table headers become duplicated after normalizing encoded ampersands."))
+    colnames(report) <- original_names
     names_without_index <- sub("^\\[[0-9]+\\][[:space:]]*", "", original_names)
-    precursor <- grepl("\\.PG\\.NrOfPrecursorsUsedForQuantification$", names_without_index)
-    abundance <- grepl("\\.PG\\.Quantity$", names_without_index)
+    measurement_kind <- proteomics_measurement_kind(names_without_index)
+    precursor <- !is.na(measurement_kind) & measurement_kind == "precursor"
+    abundance <- !is.na(measurement_kind) & measurement_kind == "abundance"
+    processed_measurement <- grepl("_quantified_precursors$|_Protein_group_abundance$", names_without_index)
+    derived <- grepl("(_percent_CV|_log2_fold_change|_(paired|unpaired)_t_test_p_value|_BH_FDR)$", names_without_index)
     run_labels <- names_without_index
     run_labels[precursor] <- sub("\\.PG\\.NrOfPrecursorsUsedForQuantification$", "", run_labels[precursor])
+    run_labels[precursor] <- sub("_quantified_precursors$", "", run_labels[precursor])
     run_labels[abundance] <- sub("\\.PG\\.Quantity$", "", run_labels[abundance])
-    matched <- (precursor | abundance) & run_labels %in% names(label_by_run)
+    run_labels[abundance] <- sub("_Protein_group_abundance$", "", run_labels[abundance])
+    sample_ids <- run_labels
+    sample_ids[processed_measurement] <- as.character(md$Sample[match(run_labels[processed_measurement], header_labels)])
+    matched <- (precursor | abundance) & !is.na(sample_ids) & sample_ids %in% names(label_by_run)
 
     replacement_names <- original_names
     replacement_names[matched & precursor] <- paste0(
-      unname(label_by_run[run_labels[matched & precursor]]),
+      unname(label_by_run[sample_ids[matched & precursor]]),
       "_quantified_precursors"
     )
     replacement_names[matched & abundance] <- paste0(
-      unname(label_by_run[run_labels[matched & abundance]]),
+      unname(label_by_run[sample_ids[matched & abundance]]),
       "_Protein_group_abundance"
     )
     validate(need(!anyDuplicated(replacement_names), "Renamed protein table headers are not unique. Review AnalysisLabel values."))
     colnames(report) <- replacement_names
 
-    available_non_data <- original_names[!(precursor | abundance)]
+    available_non_data <- original_names[!(precursor | abundance | derived)]
     selected_non_data <- selected_non_data[selected_non_data %in% available_non_data]
     if (length(selected_non_data) == 0) selected_non_data <- available_non_data
-    measurement_cols <- replacement_names[matched & (precursor | abundance)]
+    measurement_index <- which(matched & (precursor | abundance))
+    measurement_info <- data.frame(
+      renamed = replacement_names[measurement_index],
+      sample_id = sample_ids[measurement_index],
+      measurement_type = ifelse(precursor[measurement_index], "precursor", "abundance"),
+      source_order = seq_along(measurement_index),
+      stringsAsFactors = FALSE
+    )
+    sample_order <- metadata_sorted_samples(md, input$protein_quantity_order_columns)
+    if (length(sample_order) == 0) sample_order <- unique(measurement_info$sample_id)
+    measurement_info$sample_rank <- match(measurement_info$sample_id, sample_order)
+    ordered_measurements <- order_proteomics_measurement_columns(measurement_info$renamed, measurement_info$sample_rank)
+    measurement_info <- measurement_info[match(ordered_measurements, measurement_info$renamed), , drop = FALSE]
+    measurement_cols <- measurement_info$renamed
     report <- report[, c(selected_non_data, measurement_cols), drop = FALSE]
 
     selected_conditions <- input$cv_conditions
     if (is.null(selected_conditions)) selected_conditions <- character(0)
+    cv_group_col <- input$protein_cv_group_col
+    if (length(selected_conditions)) {
+      validate(need(!is.null(cv_group_col) && length(cv_group_col) && nzchar(cv_group_col) && cv_group_col %in% colnames(md), "Select a metadata column for %CV calculation."))
+    }
     protein_annotation_cols <- seq_along(selected_non_data)
     cv_df <- NULL
     if (length(selected_conditions) > 0) {
       cv_data <- lapply(selected_conditions, function(condition) {
         value_cols <- paste0(
-          as.character(header_labels[as.character(md$Condition) == condition]),
+          as.character(header_labels[as.character(md[[cv_group_col]]) == condition]),
           "_Protein_group_abundance"
         )
         value_cols <- value_cols[value_cols %in% colnames(report)]
@@ -3396,9 +4372,10 @@ server <- function(input, output, session) {
         abundances <- as.data.frame(report[, value_cols, drop = FALSE], stringsAsFactors = FALSE)
         abundances[] <- lapply(abundances, function(column) suppressWarnings(as.numeric(as.character(column))))
         apply(abundances, 1, function(values) {
-          values <- values[!is.na(values)]
-          if (length(values) < 2 || mean(values) == 0) return(NaN)
-          100 * stats::sd(values) / mean(values)
+          values <- values[is.finite(values)]
+          mean_value <- mean(values)
+          if (length(values) < 2 || !is.finite(mean_value) || mean_value <= 0) return(NaN)
+          100 * stats::sd(values) / mean_value
         })
       })
       cv_df <- as.data.frame(cv_data, check.names = FALSE)
@@ -3412,12 +4389,14 @@ server <- function(input, output, session) {
     stats_method_notes <- character(0)
     if (isTRUE(add_stats) && length(comparisons) > 0) {
       stats_blocks <- lapply(comparisons, function(comparison) {
-        groups <- strsplit(comparison, "\\|\\|\\|", fixed = FALSE)[[1]]
-        validate(need(length(groups) == 2 && groups[1] != groups[2], "Each statistics comparison must have different numerator and denominator groups."))
-        numerator <- groups[1]
-        denominator <- groups[2]
+        parsed_comparison <- parse_stats_comparison_id(comparison)
+        group_col <- parsed_comparison$group_col
+        numerator <- parsed_comparison$numerator
+        denominator <- parsed_comparison$denominator
+        validate(need(group_col %in% colnames(md), paste0("Statistics metadata column not found: ", group_col)))
+        validate(need(numerator != denominator, "Each statistics comparison must have different numerator and denominator groups."))
         requested_paired <- comparison %in% input$stats_paired_comparisons
-        pairing <- replicate_pair_plan(md, header_labels, numerator, denominator)
+        pairing <- replicate_pair_plan(md, header_labels, numerator, denominator, group_col = group_col, pair_col = input$stats_pair_col)
         effective_paired <- requested_paired && pairing$balanced
         fallback_reason <- ""
 
@@ -3430,8 +4409,8 @@ server <- function(input, output, session) {
           }
         }
         if (!effective_paired) {
-          numerator_cols <- paste0(as.character(header_labels[as.character(md$Condition) == numerator]), "_Protein_group_abundance")
-          denominator_cols <- paste0(as.character(header_labels[as.character(md$Condition) == denominator]), "_Protein_group_abundance")
+          numerator_cols <- paste0(as.character(header_labels[as.character(md[[group_col]]) == numerator]), "_Protein_group_abundance")
+          denominator_cols <- paste0(as.character(header_labels[as.character(md[[group_col]]) == denominator]), "_Protein_group_abundance")
           if (requested_paired && !pairing$balanced) fallback_reason <- pairing$reason
         }
         numerator_cols <- numerator_cols[numerator_cols %in% colnames(report)]
@@ -3441,7 +4420,7 @@ server <- function(input, output, session) {
         result <- calculate_protein_comparison(report, numerator_cols, denominator_cols, paired = effective_paired)
         log2_fc <- result$data$log2_fc
         p_value <- result$data$p_value
-        comparison_prefix <- paste0(numerator, "_vs_", denominator)
+        comparison_prefix <- stats_comparison_prefix(comparison)
         comparison_df <- data.frame(log2_fc, p_value, check.names = FALSE)
         colnames(comparison_df) <- c(
           paste0(comparison_prefix, "_log2_fold_change"),
@@ -3450,7 +4429,7 @@ server <- function(input, output, session) {
         if (isTRUE(input$stats_bh_fdr)) {
           comparison_df[[paste0(comparison_prefix, "_BH_FDR")]] <- stats::p.adjust(p_value, method = "BH")
         }
-        method_note <- paste0(numerator, " vs ", denominator, ": ", result$method)
+        method_note <- paste0(stats_comparison_label(comparison), ": ", result$method)
         if (requested_paired && !effective_paired) {
           method_note <- paste0(method_note, " (automatic fallback: ", fallback_reason, ")")
         }
@@ -3459,7 +4438,7 @@ server <- function(input, output, session) {
       })
       stats_method_notes <- vapply(stats_blocks, function(block) attr(block, "method_note"), character(1))
       stats_df <- do.call(cbind, stats_blocks)
-      stats_comparison_labels <- sub("\\|\\|\\|", " vs ", comparisons)
+      stats_comparison_labels <- vapply(comparisons, stats_comparison_label, character(1))
     }
 
     derived_order <- input$protein_derived_column_order
@@ -3489,19 +4468,128 @@ server <- function(input, output, session) {
   }
 
   protein_no_impute_table <- reactive({
-    req(project_file("protein_no_impute_file"))
-    renamed_protein_table(project_file("protein_no_impute_file"), add_stats = "S2" %in% input$stats_tables, selected_non_data = input$s2_non_data_columns)
+    cache <- project_db_cache()
+    source <- protein_source_table("S2")
+    revision <- protein_stats_refresh_revision()
+    restored_cache <- is.null(project_file("protein_no_impute_file")) && !is.null(cache$processed_s2)
+    if (restored_cache && use_cached_proteomics_table(source, revision)) return(source)
+    renamed_protein_table(source, add_stats = "S2" %in% input$stats_tables, selected_non_data = input$s2_non_data_columns)
+  })
+
+  observe({
+    md <- tryCatch(active_metadata(), error = function(e) NULL)
+    if (is.null(md) || !nrow(md)) return()
+    choices <- scoped_metadata_columns(md)
+    current <- isolate(input$protein_knn_group_col)
+    selected <- retain_metadata_choice(current, choices, c("Batch", "Condition"))
+    updateSelectInput(
+      session,
+      "protein_knn_group_col",
+      choices = c("Select metadata field..." = "", stats::setNames(choices, choices)),
+      selected = selected
+    )
+  })
+
+  observeEvent(list(input$protein_no_impute_file, imported_project_files()), {
+    generated_s3_result(NULL)
+  }, ignoreInit = TRUE)
+
+  observeEvent(list(input$protein_knn_k, input$protein_knn_max_missing_percent, input$protein_knn_scope, input$protein_knn_group_col), {
+    generated_s3_result(NULL)
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$run_protein_knn, {
+    tryCatch({
+      source <- protein_source_table("S2")
+      abundance_columns <- proteomics_abundance_columns(source)
+      validate(need(length(abundance_columns) >= 2L, "Table S2 requires at least two protein abundance columns for kNN imputation."))
+      column_groups <- NULL
+      scope <- input$protein_knn_scope
+      if (identical(scope, "metadata")) {
+        md <- active_metadata()
+        group_col <- input$protein_knn_group_col
+        validate(need(!is.null(group_col) && nzchar(group_col) && group_col %in% colnames(md), "Select a metadata field for within-group kNN imputation."))
+        sample_labels <- proteomics_abundance_sample_names(abundance_columns)
+        processed <- all(endsWith(abundance_columns, "_Protein_group_abundance"))
+        metadata_keys <- if (processed) protein_header_labels_from_metadata(md, input$protein_header_label_columns) else as.character(md$Sample)
+        matched_rows <- match(sample_labels, metadata_keys)
+        group_values <- trimws(as.character(md[[group_col]][matched_rows]))
+        validate(need(!anyNA(matched_rows) && all(nzchar(group_values)), paste0("Every Table S2 abundance column must match metadata with a non-empty ", group_col, " value.")))
+        column_groups <- split(abundance_columns, group_values)
+      }
+      result <- withProgress(message = "Generating Table S3 with kNN", value = 0.2, {
+        result <- knn_impute_protein_report(
+          source,
+          abundance_columns = abundance_columns,
+          k = input$protein_knn_k,
+          max_missing_percent = input$protein_knn_max_missing_percent,
+          column_groups = column_groups
+        )
+        incProgress(0.8, detail = "Table S3 ready")
+        result
+      })
+      result$scope <- if (identical(scope, "metadata")) paste0("within ", input$protein_knn_group_col) else "all samples"
+      generated_s3_result(result)
+      columns <- protein_non_data_columns_from_table(result$data)
+      current <- isolate(input$s3_non_data_columns)
+      selected <- current[current %in% columns]
+      if (!length(selected)) selected <- columns
+      updateSelectizeInput(session, "s3_non_data_columns", choices = columns, selected = selected, server = TRUE)
+      showNotification("kNN-imputed Table S3 generated.", type = "message", duration = 4)
+    }, error = function(e) {
+      generated_s3_result(NULL)
+      showNotification(conditionMessage(e), type = "error", duration = NULL)
+    })
+  })
+
+  output$protein_imputation_status <- renderText({
+    method <- input$s3_imputation_source
+    if (identical(method, "s2")) return("Table S3 source: Table S2 without additional imputation.")
+    if (identical(method, "spectronaut")) {
+      if (protein_source_available("S3")) return("Table S3 source: Spectronaut-imputed upload or saved project table.")
+      return("Table S3 source: Spectronaut imputation. Select an imputed report above.")
+    }
+    result <- generated_s3_result()
+    if (is.null(result)) {
+      if (is.null(project_file("protein_no_impute_file")) && !is.null(project_db_cache()$processed_s3)) {
+        return("Table S3 source: saved app-generated kNN table restored from the project.")
+      }
+      return("Table S3 source: app-generated kNN. Click Generate Table S3 with kNN.")
+    }
+    paste0(
+      "Table S3 source: app-generated kNN (k = ", result$k, ", ", result$scope, "). ",
+      nrow(result$data), " proteins retained; ", result$dropped_features, " excluded by the missingness limit; ",
+      result$missing_before, " missing values imputed; ", result$missing_after, " remain."
+    )
   })
 
   protein_imputed_table <- reactive({
-    req(project_file("protein_imputed_file"))
-    renamed_protein_table(project_file("protein_imputed_file"), add_stats = "S3" %in% input$stats_tables, selected_non_data = input$s3_non_data_columns)
+    source <- protein_source_table("S3")
+    revision <- protein_stats_refresh_revision()
+    method <- input$s3_imputation_source
+    restored_cache <- !is.null(project_db_cache()$processed_s3) &&
+      ((identical(method, "spectronaut") && is.null(project_file("protein_imputed_file"))) ||
+         (identical(method, "knn") && is.null(generated_s3_result()) && is.null(project_file("protein_no_impute_file"))))
+    if (restored_cache && use_cached_proteomics_table(source, revision)) return(source)
+    renamed_protein_table(source, add_stats = "S3" %in% input$stats_tables, selected_non_data = input$s3_non_data_columns)
+  })
+
+  output$protein_stats_status <- renderText({
+    cache <- project_db_cache()
+    has_cached_tables <- !is.null(cache$processed_s2) || !is.null(cache$processed_s3)
+    if (has_cached_tables && protein_stats_refresh_revision() <= 0L) {
+      "Showing saved protein tables and statistics from the opened project. Click Recalculate statistics after changing metadata or comparison settings."
+    } else if (isTRUE(protein_stats_paused())) {
+      "Statistics recalculation is stopped."
+    } else {
+      "Protein tables use the current statistics settings."
+    }
   })
 
   observe({
     md <- tryCatch(built_metadata(), error = function(e) NULL)
     if (is.null(md)) return()
-    choices <- setdiff(colnames(md), c("SampleDetailsID"))
+    choices <- setdiff(scoped_metadata_columns(md), c("SampleDetailsID"))
     current_batch <- isolate(input$batch_correction_batch_col)
     selected_batch <- if (!is.null(current_batch) && current_batch %in% choices) {
       current_batch
@@ -3516,16 +4604,19 @@ server <- function(input, output, session) {
     }
     if (is.na(selected_batch) || !nzchar(selected_batch)) selected_batch <- choices[1]
     if (is.na(selected_group) || !nzchar(selected_group)) selected_group <- choices[1]
-    updateSelectInput(session, "batch_correction_batch_col", choices = choices, selected = selected_batch)
-    updateSelectInput(session, "batch_correction_group_col", choices = choices, selected = selected_group)
+    selected_batch <- retain_metadata_choice(current_batch, choices, selected_batch)
+    selected_group <- retain_metadata_choice(current_group, choices, selected_group)
+    field_choices <- c("Select metadata field..." = "", stats::setNames(choices, choices))
+    updateSelectInput(session, "batch_correction_batch_col", choices = field_choices, selected = selected_batch)
+    updateSelectInput(session, "batch_correction_group_col", choices = field_choices, selected = selected_group)
   })
 
-  batch_corrected_s3_result <- eventReactive(input$run_batch_correction, {
+  batch_corrected_s3_computed <- eventReactive(input$run_batch_correction, {
     validate(
       need(requireNamespace("HarmonizR", quietly = TRUE) || requireNamespace("sva", quietly = TRUE), "Install HarmonizR or sva to run ComBat batch correction: BiocManager::install(c('HarmonizR', 'sva'))."),
-      need(!is.null(project_file("protein_imputed_file")), "Upload Table S3. Protein, imputed before running batch correction.")
+      need(protein_source_available("S3"), "Upload Table S3 or open a DuckDB project containing it before running batch correction.")
     )
-    source <- read_uploaded_table(project_file("protein_imputed_file"))
+    source <- protein_source_table("S3")
     md <- active_metadata()
     prepared <- batch_correct_prepare_input(
       report = source,
@@ -3605,23 +4696,36 @@ server <- function(input, output, session) {
     attr(table, "matched_precursor") <- 0
     attr(table, "matched_abundance") <- ncol(corrected_abundance)
     attr(table, "cv_conditions") <- character(0)
-    list(
+    result <- list(
       table = table,
       expression = expression,
       corrected_log2 = corrected_log2,
       corrected_abundance = corrected_abundance,
       prepared = prepared,
       combat_mode = combat_mode,
-      correction_method = correction_method
+      correction_method = correction_method,
+      cache_signature = batch_correction_cache_signature()
     )
+    cached_batch_corrected_s3_result(result)
+    batch_cache_message("Batch correction was run and is cached in memory. Save to the project database to reuse it after reopening the project.")
+    result
+  })
+
+  batch_corrected_s3_result <- reactive({
+    computed <- tryCatch(batch_corrected_s3_computed(), error = function(e) NULL)
+    if (!is.null(computed)) return(computed)
+    cached <- cached_batch_corrected_s3_result()
+    validate(need(!is.null(cached), "Run batch correction first, or load a database project that contains a saved batch correction."))
+    cached
   })
 
   batch_corrected_s3_table <- reactive({
     result <- batch_corrected_s3_result()
     table <- result$table
     if ("S3_batch_corrected" %in% input$stats_tables) {
+      protein_stats_refresh_revision()
       log2_stats_base <- batch_correct_rebuild_table(
-        read_uploaded_table(project_file("protein_imputed_file")),
+        protein_source_table("S3"),
         result$corrected_log2,
         result$prepared,
         suffix = "_batch_corrected_log2"
@@ -3632,6 +4736,7 @@ server <- function(input, output, session) {
         sample_map = result$prepared$sample_map,
         comparisons = input$stats_comparisons,
         paired_comparisons = input$stats_paired_comparisons,
+        pair_col = input$stats_pair_col,
         include_fdr = isTRUE(input$stats_bh_fdr),
         abundance_suffix = "_batch_corrected_log2"
       )
@@ -3642,6 +4747,7 @@ server <- function(input, output, session) {
       attr(table, "stats_comparison") <- attr(log2_stats_table, "stats_comparison")
       attr(table, "stats_methods") <- attr(log2_stats_table, "stats_methods")
     }
+    table <- reorder_batch_corrected_protein_table(table, result$prepared$sample_map)
     attr(table, "matched_precursor") <- 0
     attr(table, "matched_abundance") <- ncol(result$expression) - 1
     attr(table, "cv_conditions") <- character(0)
@@ -3655,7 +4761,7 @@ server <- function(input, output, session) {
   observe({
     comparisons <- input$stats_comparisons
     if (length(comparisons) == 0) return()
-    labels <- sub("\\|\\|\\|", " vs ", comparisons)
+    labels <- vapply(comparisons, stats_comparison_label, character(1))
     selected <- isolate(input$volcano_comparison)
     if (is.null(selected) || !selected %in% comparisons) selected <- comparisons[1]
     updateSelectInput(session, "volcano_comparison", choices = stats::setNames(comparisons, labels), selected = selected)
@@ -3684,21 +4790,28 @@ server <- function(input, output, session) {
     if (identical(source, "S3_batch_corrected")) {
       batch_corrected_s3_table()
     } else {
-      read_uploaded_table(volcano_source_file())
+      protein_source_table(source)
     }
   })
 
-  observeEvent(list(input$volcano_source, imported_project_files(), input$protein_no_impute_file, input$protein_imputed_file, input$run_batch_correction), {
+  observeEvent(list(input$volcano_source, project_restore_token(), imported_project_files(), input$protein_no_impute_file, input$protein_imputed_file, input$run_batch_correction), {
+    label_options <- c(
+      "Gene name" = "PG.Genes",
+      "Protein name" = "PG.ProteinNames",
+      "Protein accession / group" = "PG.ProteinGroups",
+      "Protein accession" = "PG.ProteinAccessions",
+      "Protein description" = "PG.ProteinDescriptions"
+    )
     if (identical(input$volcano_source, "S3_batch_corrected")) {
       corrected <- tryCatch(batch_corrected_s3_table(), error = function(e) NULL)
       if (is.null(corrected)) {
-        columns <- c("PG.Genes", "PG.ProteinGroups", "PG.ProteinNames", "PG.ProteinDescriptions")
+        columns <- unname(label_options)
       } else {
-        columns <- intersect(c("PG.Genes", "PG.ProteinGroups", "PG.ProteinNames", "PG.ProteinDescriptions"), colnames(corrected))
+        columns <- intersect(unname(label_options), colnames(corrected))
         if (length(columns) == 0) columns <- colnames(corrected)[1]
       }
     } else {
-      columns <- protein_non_data_columns(volcano_source_file())
+      columns <- intersect(unname(label_options), colnames(protein_source_table(input$volcano_source)))
     }
     selected <- isolate(input$volcano_label_col)
     if (is.null(selected) || !selected %in% columns) {
@@ -3706,16 +4819,18 @@ server <- function(input, output, session) {
       selected <- preferred[preferred %in% columns][1]
       if (is.na(selected)) selected <- columns[1]
     }
-    updateSelectInput(session, "volcano_label_col", choices = columns, selected = selected)
+    choices <- label_options[label_options %in% columns]
+    if (!length(choices)) choices <- stats::setNames(columns, columns)
+    updateSelectInput(session, "volcano_label_col", choices = choices, selected = selected)
   }, ignoreInit = FALSE)
 
   volcano_stats_table <- reactive({
     if (input$volcano_source == "S3_batch_corrected") {
       batch_corrected_s3_table()
     } else if (input$volcano_source == "S2") {
-      renamed_protein_table(project_file("protein_no_impute_file"), add_stats = TRUE, selected_non_data = input$s2_non_data_columns)
+      protein_no_impute_table()
     } else {
-      renamed_protein_table(project_file("protein_imputed_file"), add_stats = TRUE, selected_non_data = input$s3_non_data_columns)
+      protein_imputed_table()
     }
   })
 
@@ -3732,7 +4847,7 @@ server <- function(input, output, session) {
   })
 
   observeEvent(list(input$gsea_source, imported_project_files(), input$protein_no_impute_file, input$protein_imputed_file), {
-    columns <- protein_non_data_columns(gsea_source_file())
+    columns <- protein_non_data_columns_from_table(protein_source_table(input$gsea_source))
     selected <- isolate(input$gsea_gene_col)
     if (is.null(selected) || !selected %in% columns) {
       preferred <- c("PG.Genes", "Genes", "Gene", "PG.ProteinNames", "PG.ProteinGroups")
@@ -3744,9 +4859,9 @@ server <- function(input, output, session) {
 
   gsea_stats_table <- reactive({
     if (input$gsea_source == "S2") {
-      renamed_protein_table(project_file("protein_no_impute_file"), add_stats = TRUE, selected_non_data = input$s2_non_data_columns)
+      protein_no_impute_table()
     } else {
-      renamed_protein_table(project_file("protein_imputed_file"), add_stats = TRUE, selected_non_data = input$s3_non_data_columns)
+      protein_imputed_table()
     }
   })
 
@@ -3787,12 +4902,12 @@ server <- function(input, output, session) {
       need(!is.null(input$gsea_comparison) && nzchar(input$gsea_comparison), "Select a protein-group comparison before running enrichment.")
     )
     report <- gsea_stats_table()
-    source <- read_uploaded_table(gsea_source_file())
+    source <- protein_source_table(input$gsea_source)
     gene_col <- input$gsea_gene_col
     if (is.null(gene_col) || !gene_col %in% colnames(source)) gene_col <- "PG.Genes"
     validate(need(gene_col %in% colnames(source), "Select a gene symbol column for enrichment."))
 
-    prefix <- sub("\\|\\|\\|", "_vs_", input$gsea_comparison)
+    prefix <- stats_comparison_prefix(input$gsea_comparison)
     fold_change_col <- paste0(prefix, "_log2_fold_change")
     p_value_col <- comparison_p_value_column(report, prefix)
     fdr_col <- paste0(prefix, "_BH_FDR")
@@ -3848,7 +4963,7 @@ server <- function(input, output, session) {
       scale_fill_manual(values = c("Enriched in numerator" = "#B2182B", "Enriched in denominator" = "#2166AC")) +
       labs(
         title = "Gene Set Enrichment",
-        subtitle = paste0(sub("\\|\\|\\|", " vs ", input$gsea_comparison), "; ", input$gsea_species),
+        subtitle = paste0(stats_comparison_label(input$gsea_comparison), "; ", input$gsea_species),
         x = NULL,
         y = "Normalized enrichment score",
         fill = NULL
@@ -3865,7 +4980,7 @@ server <- function(input, output, session) {
   volcano_plot_data <- reactive({
     req(input$volcano_comparison)
     report <- volcano_stats_table()
-    prefix <- sub("\\|\\|\\|", "_vs_", input$volcano_comparison)
+    prefix <- stats_comparison_prefix(input$volcano_comparison)
     fold_change_col <- paste0(prefix, "_log2_fold_change")
     p_value_col <- comparison_p_value_column(report, prefix)
     fdr_col <- paste0(prefix, "_BH_FDR")
@@ -3914,13 +5029,43 @@ server <- function(input, output, session) {
       dplyr::arrange(Significance, dplyr::desc(abs(Log2FoldChange)))
   })
 
+  highlighted_volcano_hits <- reactive({
+    rows <- input$volcano_hits_table_rows_selected
+    if (is.null(rows) || !length(rows)) return(data.frame())
+    hits <- volcano_hits_data()
+    rows <- rows[rows >= 1L & rows <= nrow(hits)]
+    hits[rows, , drop = FALSE]
+  })
+
+  highlighted_volcano_features <- reactive({
+    hits <- highlighted_volcano_hits()
+    if (!nrow(hits)) return(character(0))
+    source <- volcano_source_to_feature_source(input$volcano_source)
+    info <- protein_info_for_source(source, input$report_feature_col)
+    map_volcano_hits_to_features(hits, info)
+  })
+
+  pending_feature_selection <- reactiveVal(NULL)
+  pending_box_selection <- reactiveVal(NULL)
+
+  observeEvent(input$volcano_hits_table_rows_selected, {
+    features <- highlighted_volcano_features()
+    if (!length(features)) return()
+    source <- volcano_source_to_feature_source(input$volcano_source)
+    pending_feature_selection(list(source = source, features = features))
+    pending_box_selection(list(source = source, features = features))
+    updateRadioButtons(session, "feature_data_source", selected = source)
+    updateRadioButtons(session, "script_box_source", selected = source)
+  }, ignoreInit = TRUE)
+
   volcano_counts_data <- reactive({
     comparisons <- input$stats_comparisons
     validate(need(length(comparisons) > 0, "Select at least one protein-group comparison to calculate significant-protein counts."))
     report <- volcano_stats_table()
     rows <- lapply(comparisons, function(comparison) {
-      groups <- strsplit(comparison, "\\|\\|\\|", fixed = FALSE)[[1]]
-      prefix <- sub("\\|\\|\\|", "_vs_", comparison)
+      parsed_comparison <- parse_stats_comparison_id(comparison)
+      groups <- c(parsed_comparison$numerator, parsed_comparison$denominator)
+      prefix <- stats_comparison_prefix(comparison)
       fold_change_col <- paste0(prefix, "_log2_fold_change")
       p_value_col <- comparison_p_value_column(report, prefix)
       fdr_col <- paste0(prefix, "_BH_FDR")
@@ -3937,7 +5082,8 @@ server <- function(input, output, session) {
           abs(fold_change) >= input$volcano_fc_cutoff
         data.frame(
           ComparisonID = comparison,
-          Comparison = paste(groups, collapse = " vs "),
+          MetadataColumn = parsed_comparison$group_col,
+          Comparison = stats_comparison_label(comparison),
           Numerator = groups[1],
           Denominator = groups[2],
           SignificanceMetric = metric_name,
@@ -3984,7 +5130,7 @@ server <- function(input, output, session) {
       dplyr::filter(is.finite(Log2FoldChange), is.finite(MinusLog10Significance))
     validate(need(nrow(data) > 0, "No finite statistics are available for this volcano plot."))
     metric_label <- if (input$volcano_significance_metric == "BH_FDR") "BH FDR" else "p-value"
-    comparison_label <- sub("\\|\\|\\|", " vs ", input$volcano_comparison)
+    comparison_label <- stats_comparison_label(input$volcano_comparison)
     count_subtitle <- volcano_count_subtitle(data)
     cutoff_subtitle <- paste0(comparison_label, "; cutoffs: |log2 FC| >= ", input$volcano_fc_cutoff, " and ", metric_label, " <= ", input$volcano_sig_cutoff)
 
@@ -4046,7 +5192,7 @@ server <- function(input, output, session) {
     data <- volcano_plot_data() %>%
       dplyr::filter(is.finite(Log2FoldChange), is.finite(MinusLog10Significance))
     metric_label <- if (input$volcano_significance_metric == "BH_FDR") "BH FDR" else "p-value"
-    comparison_label <- sub("\\|\\|\\|", " vs ", input$volcano_comparison)
+    comparison_label <- stats_comparison_label(input$volcano_comparison)
     count_subtitle <- volcano_count_subtitle(data)
     cutoff_subtitle <- paste0(comparison_label, "; cutoffs: |log2 FC| >= ", input$volcano_fc_cutoff, " and ", metric_label, " <= ", input$volcano_sig_cutoff)
     colors <- c("Increased" = "#B2182B", "Decreased" = "#2166AC", "Not significant" = "#BDBDBD")
@@ -4149,11 +5295,9 @@ server <- function(input, output, session) {
       attr(display_data, "z_scores") <- as.data.frame(z_values, check.names = FALSE)
       return(display_data)
     }
-    file_info <- if (identical(feature_source, "no_impute")) project_file("protein_no_impute_file") else project_file("protein_imputed_file")
-    req(file_info)
-    source <- read_uploaded_table(file_info)
-    quantity_cols <- grep("\\.PG\\.Quantity$", colnames(source), value = TRUE)
-    validate(need(length(quantity_cols) >= 1, "The selected feature source does not contain .PG.Quantity columns."))
+    source <- protein_source_table(feature_source)
+    quantity_cols <- proteomics_abundance_columns(source)
+    validate(need(length(quantity_cols) >= 1, "The selected feature source does not contain abundance columns."))
 
     feature_col <- resolve_report_feature_col(source, input$report_feature_col)
     validate(need(!is.na(feature_col), "No feature identifier column found in the report."))
@@ -4175,9 +5319,8 @@ server <- function(input, output, session) {
       row_z
     }))
 
-    sample_names <- sub("^\\[[0-9]+\\][[:space:]]*", "", quantity_cols)
-    sample_names <- sub("\\.PG\\.Quantity$", "", sample_names)
-    if (!is.null(project_file("meta_file"))) {
+    sample_names <- protein_sample_names_for_table(source, quantity_cols)
+    if (!is.null(project_db_cache()$metadata) || !is.null(project_file("meta_file"))) {
       md <- active_metadata()
       label_by_sample <- stats::setNames(as.character(md$AnalysisLabel), as.character(md$Sample))
       matched <- sample_names %in% names(label_by_sample)
@@ -4193,8 +5336,8 @@ server <- function(input, output, session) {
 
     significant <- rep("No", sum(keep_rows))
     volcano_ready <- !is.null(input$volcano_comparison) &&
-      ((identical(input$volcano_source, "S2") && !is.null(project_file("protein_no_impute_file"))) ||
-       (identical(input$volcano_source, "S3") && !is.null(project_file("protein_imputed_file"))))
+      ((identical(input$volcano_source, "S2") && protein_source_available("S2")) ||
+       (identical(input$volcano_source, "S3") && protein_source_available("S3")))
     if (volcano_ready) {
       volcano_data <- tryCatch(volcano_plot_data(), error = function(e) NULL)
       if (!is.null(volcano_data) && "ProteinGroupID" %in% colnames(volcano_data)) {
@@ -4221,9 +5364,8 @@ server <- function(input, output, session) {
     display_data
   })
 
-  feature_name_for_row <- function(file_info, row_index) {
-    df <- read_uploaded_table(file_info)
-    quantity_cols <- grep("\\.PG\\.Quantity$", colnames(df), value = TRUE)
+  feature_name_for_row <- function(df, row_index) {
+    quantity_cols <- proteomics_abundance_columns(df)
     feature_col <- resolve_report_feature_col(df, input$report_feature_col)
     validate(need(!is.na(feature_col), "No feature identifier column found in the report."))
     values <- df[, quantity_cols, drop = FALSE]
@@ -4237,11 +5379,29 @@ server <- function(input, output, session) {
   }
 
   observeEvent(feature_expression_data(), {
-    choices <- feature_expression_data()$Feature
+    expr <- feature_expression_data()
+    choices <- protein_feature_choices(input$feature_data_source, expr)
+    choice_values <- unname(choices)
     current <- isolate(input$feature_select)
-    selected <- if (!is.null(current) && current %in% choices) current else choices[1]
+    current <- current[current %in% choice_values]
+    selected <- if (length(current)) current else choice_values[1]
+    freezeReactiveValue(input, "feature_select")
     updateSelectizeInput(session, "feature_select", choices = choices, selected = selected, server = TRUE)
   }, ignoreInit = FALSE)
+
+  observe({
+    pending <- pending_feature_selection()
+    req(!is.null(pending), identical(input$feature_data_source, pending$source))
+    expr <- feature_expression_data()
+    choices <- protein_feature_choices(input$feature_data_source, expr)
+    selected <- intersect(pending$features, unname(choices))
+    pending_feature_selection(NULL)
+    req(length(selected))
+    session$onFlushed(function() {
+      freezeReactiveValue(input, "feature_select")
+      updateSelectizeInput(session, "feature_select", choices = choices, selected = selected, server = TRUE)
+    }, once = TRUE)
+  })
 
   observe({
     md <- tryCatch(active_metadata(), error = function(e) NULL)
@@ -4249,11 +5409,14 @@ server <- function(input, output, session) {
       updateSelectizeInput(session, "feature_order_columns", choices = character(0), selected = character(0), server = FALSE)
       return()
     }
-    choices <- setdiff(colnames(md), c("SampleDetailsID", "Excluded", "ExclusionReason"))
+    choices <- setdiff(scoped_metadata_columns(md), c("SampleDetailsID", "Excluded", "ExclusionReason"))
     current <- isolate(input$feature_order_columns)
     selected <- current[current %in% choices]
-    if (length(selected) == 0) {
-      defaults <- c(if ("Group" %in% choices) "Group" else "Condition", "Batch", "RunOrder")
+    saved <- unlist(restored_project_settings()$feature_order_columns, use.names = FALSE)
+    saved <- saved[saved %in% choices]
+    if (is.null(current) && length(saved) > 0) selected <- saved
+    if (is.null(current) && length(selected) == 0) {
+      defaults <- c("Condition", "Group", "Batch", "Subject", "Replicate", "RunOrder")
       selected <- defaults[defaults %in% choices]
     }
     updateSelectizeInput(
@@ -4263,12 +5426,19 @@ server <- function(input, output, session) {
       selected = selected,
       server = FALSE
     )
+    current_group <- isolate(input$feature_group_by)
+    selected_group <- retain_metadata_choice(current_group, choices, "Condition")
+    updateSelectInput(session, "feature_group_by", choices = c("Select grouping field..." = "", stats::setNames(choices, choices)), selected = selected_group)
+    label_choices <- c("Select label field..." = "", stats::setNames(choices, choices))
+    current_label <- isolate(input$feature_label_by)
+    selected_label <- retain_metadata_choice(current_label, choices, c("AnalysisLabel", "Sample"))
+    updateSelectInput(session, "feature_label_by", choices = label_choices, selected = selected_label)
   })
 
   observeEvent(input$protein_no_impute_preview_rows_selected, {
     row_index <- input$protein_no_impute_preview_rows_selected[1]
-    req(row_index, project_file("protein_no_impute_file"))
-    feature <- feature_name_for_row(project_file("protein_no_impute_file"), row_index)
+    req(row_index, protein_source_available("S2"))
+    feature <- feature_name_for_row(protein_source_table("S2"), row_index)
     req(!is.na(feature))
     updateRadioButtons(session, "feature_data_source", selected = "no_impute")
     session$onFlushed(function() {
@@ -4279,8 +5449,8 @@ server <- function(input, output, session) {
 
   observeEvent(input$protein_imputed_preview_rows_selected, {
     row_index <- input$protein_imputed_preview_rows_selected[1]
-    req(row_index, project_file("protein_imputed_file"))
-    feature <- feature_name_for_row(project_file("protein_imputed_file"), row_index)
+    req(row_index, protein_source_available("S3"))
+    feature <- feature_name_for_row(protein_source_table("S3"), row_index)
     req(!is.na(feature))
     updateRadioButtons(session, "feature_data_source", selected = "imputed")
     session$onFlushed(function() {
@@ -4295,33 +5465,36 @@ server <- function(input, output, session) {
     table <- feature_matrix_data()
     req(row_index <= nrow(table))
     updateRadioButtons(session, "script_box_source", selected = input$feature_data_source)
-    updateSelectizeInput(session, "script_box_feature", selected = table$Protein[row_index])
+    updateSelectizeInput(session, "script_box_features", selected = table$Protein[row_index])
     updateTabsetPanel(session, "workflow_tabs", selected = "Boxplot")
   })
 
-  cv_from_report <- function(file_info) {
-    report <- read_uploaded_table(file_info)
+  cv_from_report <- function(report) {
     md <- active_metadata()
-    validate(need("Condition" %in% colnames(md), "Build metadata with Condition values before calculating CV distributions."))
+    group_col <- input$cv_plot_group_col
+    validate(need(length(group_col) == 1L && group_col %in% colnames(md), "Select a metadata field for CV grouping."))
 
-    names_without_index <- sub("^\\[[0-9]+\\][[:space:]]*", "", colnames(report))
-    abundance <- grepl("\\.PG\\.Quantity$", names_without_index)
-    run_labels <- sub("\\.PG\\.Quantity$", "", names_without_index[abundance])
-    value_cols <- which(abundance)
-    condition_data <- unique(as.character(md$Condition[!is.na(md$Condition) & md$Condition != ""]))
+    abundance_columns <- proteomics_abundance_columns(report)
+    run_labels <- proteomics_abundance_sample_names(abundance_columns)
+    value_cols <- match(abundance_columns, colnames(report))
+    restored_processed <- any(endsWith(abundance_columns, "_Protein_group_abundance"))
+    header_labels <- if (restored_processed) protein_header_labels_from_metadata(md, input$protein_header_label_columns) else as.character(md$Sample)
+    group_values <- as.character(md[[group_col]])
+    condition_data <- unique(group_values[!is.na(group_values) & group_values != ""])
     density_rows <- list()
     median_rows <- list()
 
     for (condition in condition_data) {
-      condition_runs <- as.character(md$Sample[as.character(md$Condition) == condition])
+      condition_runs <- header_labels[group_values == condition]
       cols <- value_cols[run_labels %in% condition_runs]
       if (length(cols) < 2) next
       values <- as.data.frame(report[, cols, drop = FALSE], stringsAsFactors = FALSE)
       values[] <- lapply(values, function(column) suppressWarnings(as.numeric(as.character(column))))
       cv <- apply(values, 1, function(row_values) {
-        row_values <- row_values[!is.na(row_values)]
-        if (length(row_values) < 2 || mean(row_values) == 0) return(NA_real_)
-        100 * stats::sd(row_values) / mean(row_values)
+        row_values <- row_values[is.finite(row_values)]
+        mean_value <- mean(row_values)
+        if (length(row_values) < 2 || !is.finite(mean_value) || mean_value <= 0) return(NA_real_)
+        100 * stats::sd(row_values) / mean_value
       })
       cv <- cv[is.finite(cv)]
       if (length(cv) < 2) next
@@ -4334,7 +5507,7 @@ server <- function(input, output, session) {
       list(
         density = dplyr::bind_rows(density_rows),
         medians = dplyr::bind_rows(median_rows),
-        mode = paste0("Calculated from protein abundance values (density smoothness ", input$cv_density_adjust, ")")
+        mode = paste0("Calculated from protein abundance values, grouped by ", group_col, " (density smoothness ", input$cv_density_adjust, ")")
       )
   }
 
@@ -4343,12 +5516,14 @@ server <- function(input, output, session) {
     expression <- result$expression
     sample_map <- result$prepared$sample_map
     active_md <- active_metadata()
+    group_col <- input$cv_plot_group_col
+    validate(need(length(group_col) == 1L && group_col %in% colnames(active_md), "Select a metadata field for CV grouping."))
     if ("Sample" %in% colnames(active_md)) {
       sample_map <- sample_map[sample_map$Sample %in% as.character(active_md$Sample), , drop = FALSE]
     }
     validate(
       need(ncol(expression) > 2, "Run batch correction before calculating CV distributions from batch-corrected S3."),
-      need(all(c("Sample", "Group") %in% colnames(sample_map)), "Batch-corrected sample metadata is missing sample/group labels.")
+      need("Sample" %in% colnames(sample_map), "Batch-corrected sample metadata is missing sample labels.")
     )
 
     value_cols <- intersect(sample_map$Sample, colnames(expression))
@@ -4356,7 +5531,7 @@ server <- function(input, output, session) {
     values <- as.data.frame(expression[, value_cols, drop = FALSE], stringsAsFactors = FALSE)
     values[] <- lapply(values, function(column) 2^suppressWarnings(as.numeric(as.character(column))))
 
-    condition_by_sample <- stats::setNames(as.character(sample_map$Group), as.character(sample_map$Sample))
+    condition_by_sample <- cv_sample_groups(active_md, group_col, as.character(sample_map$Sample))
     condition_data <- unique(condition_by_sample[value_cols])
     condition_data <- condition_data[!is.na(condition_data) & nzchar(condition_data)]
     density_rows <- list()
@@ -4367,8 +5542,9 @@ server <- function(input, output, session) {
       if (length(cols) < 2) next
       cv <- apply(values[, cols, drop = FALSE], 1, function(row_values) {
         row_values <- row_values[is.finite(row_values)]
-        if (length(row_values) < 2 || mean(row_values) == 0) return(NA_real_)
-        100 * stats::sd(row_values) / mean(row_values)
+        mean_value <- mean(row_values)
+        if (length(row_values) < 2 || !is.finite(mean_value) || mean_value <= 0) return(NA_real_)
+        100 * stats::sd(row_values) / mean_value
       })
       cv <- cv[is.finite(cv)]
       if (length(cv) < 2) next
@@ -4381,7 +5557,7 @@ server <- function(input, output, session) {
     list(
       density = dplyr::bind_rows(density_rows),
       medians = dplyr::bind_rows(median_rows),
-      mode = paste0("Calculated from batch-corrected S3 log2 values converted back to abundance scale (density smoothness ", input$cv_density_adjust, ")")
+      mode = paste0("Calculated from batch-corrected S3 log2 values converted back to abundance scale, grouped by ", group_col, " (density smoothness ", input$cv_density_adjust, ")")
     )
   }
 
@@ -4425,12 +5601,10 @@ server <- function(input, output, session) {
       cv_source,
       "uploaded" = cv_from_distribution_file(),
       "no_impute" = {
-        req(project_file("protein_no_impute_file"))
-        cv_from_report(project_file("protein_no_impute_file"))
+        cv_from_report(protein_source_table("no_impute"))
       },
       "imputed" = {
-        req(project_file("protein_imputed_file"))
-        cv_from_report(project_file("protein_imputed_file"))
+        cv_from_report(protein_source_table("imputed"))
       },
       "S3_batch_corrected" = {
         cv_from_batch_corrected_s3()
@@ -4494,8 +5668,11 @@ server <- function(input, output, session) {
   })
 
   identifications_overview_data <- reactive({
-    req(project_file("identifications_overview_file"))
-    data <- read_uploaded_table(project_file("identifications_overview_file"))
+    data <- project_input_table(
+      project_file("identifications_overview_file"),
+      project_db_cache()$identifications_overview
+    )
+    validate(need(!is.null(data), "Select an IdentificationsOverview table or open a project containing one."))
     required <- c("Condition", "Replicate", "Precursors", "ProteinGroups")
     validate(need(all(required %in% colnames(data)), "IdentificationsOverview table must contain Condition, Replicate, Precursors, and ProteinGroups columns."))
     data$SourceLabel <- paste(data$Condition, data$Replicate, sep = ".")
@@ -4546,14 +5723,18 @@ server <- function(input, output, session) {
   })
 
   run_identifications_data <- reactive({
-    file_info <- if (input$identification_metric == "ProteinGroups") {
-      req(project_file("run_identifications_protein_file"))
-      project_file("run_identifications_protein_file")
+    data <- if (input$identification_metric == "ProteinGroups") {
+      project_input_table(
+        project_file("run_identifications_protein_file"),
+        project_db_cache()$run_identifications_protein
+      )
     } else {
-      req(project_file("run_identifications_precursor_file"))
-      project_file("run_identifications_precursor_file")
+      project_input_table(
+        project_file("run_identifications_precursor_file"),
+        project_db_cache()$run_identifications_precursor
+      )
     }
-    data <- read_uploaded_table(file_info)
+    validate(need(!is.null(data), "Select the corresponding run-identifications table or open a project containing one."))
     validate(need(ncol(data) >= 5, "Run identifications table must contain a run-label column and four identification category columns."))
     names(data)[1:5] <- c("SourceLabel", "Complete Identifications", "Shared in >=50% of the Runs", "Sparse Identifications", "Unique Identifications")
     overview <- identifications_overview_data()
@@ -4647,10 +5828,10 @@ server <- function(input, output, session) {
   }
 
   observe({
-    if (!is.null(project_file("meta_file")) || !is.null(project_file("run_order_file")) || !is.null(project_file("sample_details_file"))) {
-      md <- built_metadata()
-      meta_choices <- setdiff(colnames(md), "Sample")
-      label_choices <- colnames(md)
+    md <- tryCatch(built_metadata(), error = function(e) NULL)
+    if (!is.null(md)) {
+      meta_choices <- setdiff(scoped_metadata_columns(md), "Sample")
+      label_choices <- scoped_metadata_columns(md)
       current_label <- isolate(input$label_mode)
       selected_label <- if (!is.null(current_label) && current_label %in% label_choices) {
         current_label
@@ -4659,13 +5840,14 @@ server <- function(input, output, session) {
       } else {
         label_choices[1]
       }
-      updateSelectInput(session, "label_mode", choices = label_choices, selected = selected_label)
+      selected_label <- retain_metadata_choice(current_label, label_choices, "AnalysisLabel")
+      updateSelectInput(session, "label_mode", choices = c("Select label field..." = "", stats::setNames(label_choices, label_choices)), selected = selected_label)
       updateSelectInput(session, "color_by",
-        choices = c("None", meta_choices),
-        selected = if ("Condition" %in% meta_choices) "Condition" else "None")
+        choices = c("Select metadata field..." = "", "None" = "None", stats::setNames(meta_choices, meta_choices)),
+        selected = retain_metadata_choice(isolate(input$color_by), c("None", meta_choices), c("Condition", "None")))
       updateSelectInput(session, "shape_by",
-        choices = c("None", meta_choices),
-        selected = "None")
+        choices = c("Select metadata field..." = "", "None" = "None", stats::setNames(meta_choices, meta_choices)),
+        selected = retain_metadata_choice(isolate(input$shape_by), c("None", meta_choices), "None"))
     } else {
       updateSelectInput(session, "label_mode", choices = c("Sample"), selected = "Sample")
       updateSelectInput(session, "color_by", choices = "None", selected = "None")
@@ -4675,13 +5857,41 @@ server <- function(input, output, session) {
 
   observe({
     md <- tryCatch(built_metadata(), error = function(e) NULL)
-    choices <- if (!is.null(md)) colnames(md) else c("Sample", "Condition", "Replicate", "AnalysisLabel")
-    metadata_choices <- c("None", choices)
-    selected_color <- if ("Condition" %in% choices) "Condition" else "None"
-    selected_shape <- if ("Replicate" %in% choices) "Replicate" else "None"
+    choices <- if (!is.null(md)) scoped_metadata_columns(md) else character(0)
+    metadata_choices <- c("Select metadata field..." = "", "None" = "None", stats::setNames(choices, choices))
+    selected_color <- retain_metadata_choice(isolate(input$clustvis_pca_color_by), c("None", choices), c("Condition", "None"))
+    selected_shape <- retain_metadata_choice(isolate(input$clustvis_pca_shape_by), c("None", choices), c("Replicate", "None"))
+    selected_label <- retain_metadata_choice(isolate(input$clustvis_pca_label_by), c("None", choices), "None")
+    selected_subset <- retain_metadata_choice(isolate(input$clustvis_pca_subset_column), c("", choices), "")
     updateSelectInput(session, "clustvis_pca_color_by", choices = metadata_choices, selected = selected_color)
     updateSelectInput(session, "clustvis_pca_shape_by", choices = metadata_choices, selected = selected_shape)
-    updateSelectInput(session, "clustvis_pca_label_by", choices = metadata_choices, selected = "None")
+    updateSelectInput(session, "clustvis_pca_label_by", choices = metadata_choices, selected = selected_label)
+    updateSelectInput(
+      session,
+      "clustvis_pca_subset_column",
+      choices = c("All samples" = "", stats::setNames(choices, choices)),
+      selected = selected_subset
+    )
+  })
+
+  observe({
+    md <- tryCatch(active_metadata(), error = function(e) NULL)
+    subset_column <- input$clustvis_pca_subset_column
+    if (is.null(md) || is.null(subset_column) || !nzchar(subset_column) || !subset_column %in% colnames(md)) {
+      updateSelectizeInput(session, "clustvis_pca_subset_values", choices = character(0), selected = character(0), server = TRUE)
+      return()
+    }
+    values <- sort(unique(trimws(as.character(md[[subset_column]]))))
+    values <- values[!is.na(values) & nzchar(values)]
+    current <- isolate(input$clustvis_pca_subset_values)
+    selected <- current[current %in% values]
+    updateSelectizeInput(
+      session,
+      "clustvis_pca_subset_values",
+      choices = stats::setNames(values, values),
+      selected = selected,
+      server = TRUE
+    )
   })
 
   observe({
@@ -4704,10 +5914,19 @@ server <- function(input, output, session) {
     )
   })
 
-  clustvis_pca_results <- eventReactive(input$run_clustvis_pca, {
+  clustvis_pca_results <- eventReactive(list(input$run_clustvis_pca, metadata_apply_revision()), {
+    req(input$run_clustvis_pca > 0)
     expr <- expression_data_for_protein_source(input$clustvis_pca_source)
     X <- t(as.matrix(expr[, -1, drop = FALSE]))
+    X <- normalize_pca_missing_values(X)
     rownames(X) <- colnames(expr)[-1]
+    subset_result <- subset_pca_samples(
+      X,
+      sample_metadata_for_plotting(rownames(X)),
+      input$clustvis_pca_subset_column,
+      input$clustvis_pca_subset_values
+    )
+    X <- subset_result$expression
     min_observed <- ceiling(nrow(X) * input$clustvis_pca_min_observed_percent / 100)
     keep_features <- colSums(!is.na(X)) >= min_observed
     retained_features <- sum(keep_features)
@@ -4769,6 +5988,8 @@ server <- function(input, output, session) {
       retained_features = retained_features,
       variable_features = ncol(X_imp),
       total_features = total_features,
+      included_samples = nrow(X),
+      excluded_by_subset = subset_result$excluded_samples,
       missing_values_before_imputation = sum(is.na(X)),
       imputation_method = imputation_method
     )
@@ -4844,8 +6065,7 @@ server <- function(input, output, session) {
       p <- p + geom_text(data = label_df, aes(label = Label), vjust = -0.75, size = input$clustvis_pca_label_size, show.legend = FALSE)
     }
     p +
-      theme_bw(base_size = 14) +
-      coord_fixed() +
+      theme_bw(base_size = 12) +
       guides(
         color = guide_legend(order = 1, override.aes = list(alpha = 1)),
         shape = guide_legend(order = 2, override.aes = list(alpha = 1))
@@ -4964,6 +6184,7 @@ server <- function(input, output, session) {
   pca_results <- eventReactive(input$run_pca, {
     df <- parsed_data()
     X <- as.matrix(df[, -1, drop = FALSE])
+    X <- normalize_pca_missing_values(X)
     rownames(X) <- df$Sample
     min_observed <- ceiling(nrow(X) * input$pca_min_observed_percent / 100)
     keep_features <- colSums(!is.na(X)) >= min_observed
@@ -5129,56 +6350,33 @@ server <- function(input, output, session) {
   })
 
   feature_plot_df <- reactive({
-    req(input$feature_select)
+    features <- unique(as.character(input$feature_select))
+    features <- features[!is.na(features) & nzchar(features)]
+    req(length(features) > 0)
     expr <- feature_expression_data()
-    validate(need(input$feature_select %in% expr$Feature, "Selected feature not found."))
-
-    row <- expr[expr$Feature == input$feature_select, , drop = FALSE]
-    vals <- suppressWarnings(as.numeric(row[1, -1, drop = TRUE]))
-
-    out <- data.frame(Sample = colnames(expr)[-1], Value = vals, stringsAsFactors = FALSE)
-    if (!is.null(project_file("meta_file")) || !is.null(project_file("run_order_file")) || !is.null(project_file("sample_details_file"))) {
-      out <- out %>% left_join(active_metadata(), by = "Sample")
-    }
-
-    fallback_label <- if ("AnalysisLabel" %in% colnames(out)) out$AnalysisLabel else make_display_label(out)
-    if (all(c("Condition", "Replicate") %in% colnames(out))) {
-      out$DisplayLabel <- condition_replicate_label(out$Condition, out$Replicate, fallback_label)
-    } else {
-      out$DisplayLabel <- fallback_label
-    }
-    out <- out %>% filter(!is.na(Value))
-    validate(need(nrow(out) > 0, "No numeric abundance values available for this feature."))
+    features <- intersect(features, as.character(expr$Feature))
+    validate(need(length(features) > 0, "Selected feature(s) not found."))
 
     source_is_log2 <- identical(input$feature_data_source, "S3_batch_corrected")
-    out$RawValue <- if (source_is_log2) {
-      2^out$Value
-    } else {
-      out$Value
-    }
-    out$Log2Value <- if (source_is_log2) {
-      out$Value
-    } else {
-      values <- suppressWarnings(log2(out$Value))
-      values[!is.finite(values)] <- NA_real_
-      values
-    }
     value_scale <- input$feature_value_scale
     if (is.null(value_scale) || !value_scale %in% c("raw", "log2")) value_scale <- "raw"
-    out$PlotValue <- if (identical(value_scale, "log2")) out$Log2Value else out$RawValue
-    out <- out[is.finite(out$PlotValue), , drop = FALSE]
-    validate(need(nrow(out) > 0, "No finite values available for the selected feature plot scale."))
 
-    out$PlotCenteredValue <- out$PlotValue - mean(out$PlotValue, na.rm = TRUE)
-    val_sd <- stats::sd(out$PlotValue, na.rm = TRUE)
-    out$PlotZValue <- if (is.na(val_sd) || val_sd == 0) 0 else as.numeric(scale(out$PlotValue))
+    base <- data.frame(Sample = colnames(expr)[-1], stringsAsFactors = FALSE)
+    base <- base %>% left_join(sample_metadata_for_plotting(base$Sample), by = "Sample")
+    label_col <- input$feature_label_by
+    base$DisplayLabel <- if (!is.null(label_col) && label_col %in% colnames(base)) as.character(base[[label_col]]) else as.character(base$Sample)
+    missing_labels <- is.na(base$DisplayLabel) | !nzchar(base$DisplayLabel)
+    base$DisplayLabel[missing_labels] <- as.character(base$Sample[missing_labels])
+    group_col <- input$feature_group_by
+    base$GroupValue <- if (!is.null(group_col) && group_col %in% colnames(base)) as.character(base[[group_col]]) else "All samples"
+    base$GroupValue[is.na(base$GroupValue) | !nzchar(base$GroupValue)] <- "Missing"
 
-    out$.input_order <- seq_len(nrow(out))
+    base$.input_order <- seq_len(nrow(base))
     order_columns <- input$feature_order_columns
-    order_columns <- order_columns[order_columns %in% colnames(out)]
+    order_columns <- order_columns[order_columns %in% colnames(base)]
     if (length(order_columns) > 0) {
       order_args <- lapply(order_columns, function(column) {
-        values <- out[[column]]
+        values <- base[[column]]
         if (inherits(values, c("numeric", "integer", "Date", "POSIXct", "POSIXlt"))) return(values)
         numeric_values <- suppressWarnings(as.numeric(as.character(values)))
         if (sum(is.finite(numeric_values)) >= max(2, floor(0.8 * length(values)))) {
@@ -5189,25 +6387,59 @@ server <- function(input, output, session) {
         values[is.na(values) | !nzchar(values)] <- "zzzz_missing"
         values
       })
-      order_index <- do.call(order, c(order_args, list(out$.input_order, na.last = TRUE)))
-      out <- out[order_index, , drop = FALSE]
+      order_index <- do.call(order, c(order_args, list(base$.input_order, na.last = TRUE)))
+      base <- base[order_index, , drop = FALSE]
     }
-    out$.plot_order <- seq_len(nrow(out))
-    out$DisplayLabel <- factor(out$DisplayLabel, levels = out$DisplayLabel)
+    base$.plot_order <- seq_len(nrow(base))
+    base$.BarID <- factor(base$Sample, levels = unique(base$Sample))
+    display_levels <- unique(as.character(base$DisplayLabel))
+
+    rows <- lapply(features, function(feature) {
+      row <- expr[expr$Feature == feature, , drop = FALSE]
+      vals <- suppressWarnings(as.numeric(row[1, -1, drop = TRUE]))
+      names(vals) <- colnames(expr)[-1]
+      out <- base
+      out$Feature <- feature
+      out$Value <- unname(vals[out$Sample])
+      out <- out[!is.na(out$Value), , drop = FALSE]
+      if (!nrow(out)) return(out)
+      out$RawValue <- if (source_is_log2) {
+        2^out$Value
+      } else {
+        out$Value
+      }
+      out$Log2Value <- if (source_is_log2) {
+        out$Value
+      } else {
+        values <- suppressWarnings(log2(out$Value))
+        values[!is.finite(values)] <- NA_real_
+        values
+      }
+      out$PlotValue <- if (identical(value_scale, "log2")) out$Log2Value else out$RawValue
+      out <- out[is.finite(out$PlotValue), , drop = FALSE]
+      if (!nrow(out)) return(out)
+      out$PlotCenteredValue <- out$PlotValue - mean(out$PlotValue, na.rm = TRUE)
+      val_sd <- stats::sd(out$PlotValue, na.rm = TRUE)
+      out$PlotZValue <- if (is.na(val_sd) || val_sd == 0) 0 else as.numeric(scale(out$PlotValue))
+      out
+    })
+    out <- do.call(rbind, rows)
+    validate(need(!is.null(out) && nrow(out) > 0, "No finite values available for the selected feature(s) at this plot scale."))
+    out$Feature <- factor(as.character(out$Feature), levels = features)
+    out$DisplayLabel <- factor(as.character(out$DisplayLabel), levels = display_levels)
     out
   })
 
   observe({
-    if (is.null(project_file("meta_file")) && is.null(project_file("run_order_file")) &&
-        is.null(project_file("sample_details_file"))) {
+    md <- tryCatch(active_metadata(), error = function(e) NULL)
+    if (is.null(md)) {
       updateSelectInput(session, "box_group_by", choices = c("Sample"), selected = "Sample")
       updateSelectInput(session, "script_box_group_by", choices = c("Sample"), selected = "Sample")
+      updateSelectInput(session, "script_box_label_by", choices = c("None", "Sample"), selected = "None")
       return()
     }
 
-    md <- active_metadata()
-    choices <- setdiff(colnames(md), c("SampleDetailsID", "File Name"))
-    if (!length(choices)) choices <- "Sample"
+    choices <- setdiff(scoped_metadata_columns(md), c("SampleDetailsID", "File Name"))
     current <- isolate(input$box_group_by)
     selected <- if (!is.null(current) && current %in% choices) {
       current
@@ -5216,7 +6448,9 @@ server <- function(input, output, session) {
     } else {
       choices[1]
     }
-    updateSelectInput(session, "box_group_by", choices = choices, selected = selected)
+    selected <- retain_metadata_choice(current, choices, "Condition")
+    field_choices <- c("Select grouping field..." = "", stats::setNames(choices, choices))
+    updateSelectInput(session, "box_group_by", choices = field_choices, selected = selected)
     current_script <- isolate(input$script_box_group_by)
     selected_script <- if (!is.null(current_script) && current_script %in% choices) {
       current_script
@@ -5225,7 +6459,12 @@ server <- function(input, output, session) {
     } else {
       choices[1]
     }
-    updateSelectInput(session, "script_box_group_by", choices = choices, selected = selected_script)
+    selected_script <- retain_metadata_choice(current_script, choices, "Condition")
+    updateSelectInput(session, "script_box_group_by", choices = field_choices, selected = selected_script)
+    label_choices <- c("None" = "None", stats::setNames(choices, choices))
+    current_label <- isolate(input$script_box_label_by)
+    selected_label <- if (!is.null(current_label) && current_label %in% unname(label_choices)) current_label else "None"
+    updateSelectInput(session, "script_box_label_by", choices = label_choices, selected = selected_label)
   })
 
   script_box_expression_data <- reactive({
@@ -5233,11 +6472,29 @@ server <- function(input, output, session) {
   })
 
   observeEvent(script_box_expression_data(), {
-    choices <- script_box_expression_data()$Feature
-    current <- isolate(input$script_box_feature)
-    selected <- if (!is.null(current) && current %in% choices) current else choices[1]
-    updateSelectizeInput(session, "script_box_feature", choices = choices, selected = selected, server = TRUE)
+    expr <- script_box_expression_data()
+    choices <- protein_feature_choices(input$script_box_source, expr)
+    current <- isolate(input$script_box_features)
+    choice_values <- unname(choices)
+    current <- current[current %in% choice_values]
+    selected <- if (length(current)) current else choice_values[1]
+    freezeReactiveValue(input, "script_box_features")
+    updateSelectizeInput(session, "script_box_features", choices = choices, selected = selected, server = TRUE)
   }, ignoreInit = FALSE)
+
+  observe({
+    pending <- pending_box_selection()
+    req(!is.null(pending), identical(input$script_box_source, pending$source))
+    expr <- script_box_expression_data()
+    choices <- protein_feature_choices(input$script_box_source, expr)
+    selected <- intersect(pending$features, unname(choices))
+    pending_box_selection(NULL)
+    req(length(selected))
+    session$onFlushed(function() {
+      freezeReactiveValue(input, "script_box_features")
+      updateSelectizeInput(session, "script_box_features", choices = choices, selected = selected, server = TRUE)
+    }, once = TRUE)
+  })
 
   script_box_all_groups <- reactive({
     expr <- script_box_expression_data()
@@ -5259,13 +6516,13 @@ server <- function(input, output, session) {
   }, ignoreInit = FALSE)
 
   script_box_plot_df <- reactive({
-    req(input$script_box_feature)
+    req(input$script_box_features)
     expr <- script_box_expression_data()
-    validate(need(input$script_box_feature %in% expr$Feature, "Selected feature not found."))
-    row <- expr[expr$Feature == input$script_box_feature, , drop = FALSE]
-    values <- suppressWarnings(as.numeric(row[1, -1, drop = TRUE]))
-    df <- data.frame(Sample = colnames(expr)[-1], Value = values, stringsAsFactors = FALSE)
+    selected_features <- intersect(as.character(input$script_box_features), as.character(expr$Feature))
+    validate(need(length(selected_features) > 0, "Selected proteins were not found."))
+    df <- build_multifeature_boxplot_data(expr, selected_features)
     df <- df %>% left_join(sample_metadata_for_plotting(df$Sample), by = "Sample")
+    df <- deduplicate_feature_samples(df)
     group_col <- input$script_box_group_by
     validate(need(!is.null(group_col) && group_col %in% colnames(df), "Choose an available metadata column for grouping."))
     df$GroupValue <- as.character(df[[group_col]])
@@ -5277,6 +6534,9 @@ server <- function(input, output, session) {
     } else {
       df$GroupValue <- factor(df$GroupValue, levels = unique(df$GroupValue))
     }
+    label_col <- input$script_box_label_by
+    df$PointLabel <- if (!is.null(label_col) && !identical(label_col, "None") && label_col %in% colnames(df)) as.character(df[[label_col]]) else ""
+    df$PointLabel[is.na(df$PointLabel)] <- ""
     source_is_log2 <- identical(input$script_box_source, "S3_batch_corrected")
     df$PlotValue <- if (identical(input$script_box_value_scale, "log2")) {
       if (source_is_log2) {
@@ -5377,13 +6637,19 @@ server <- function(input, output, session) {
 
   script_box_plot_obj <- reactive({
     df <- script_box_plot_df()
-    title_text <- if (nzchar(input$script_box_title)) input$script_box_title else input$script_box_feature
+    script_box_ncol_value <- suppressWarnings(as.integer(input$script_box_ncol))
+    if (is.na(script_box_ncol_value) || script_box_ncol_value < 1) script_box_ncol_value <- 1L
+    text_scale <- facet_text_scale(script_box_ncol_value)
+    scaled_text_size <- max(8, input$script_box_text_size * text_scale)
+    scaled_label_size <- max(1.8, input$script_box_label_size * text_scale)
+    selected_features <- unique(as.character(df$Feature))
+    title_text <- if (nzchar(input$script_box_title)) input$script_box_title else if (length(selected_features) == 1L) selected_features else "Selected protein groups"
     y_title <- if (nzchar(input$script_box_y_axis_title)) {
       input$script_box_y_axis_title
     } else if (identical(input$script_box_value_scale, "log2")) {
-      paste(input$script_box_feature, "Log2 Abundance")
+      "Log2 protein abundance"
     } else {
-      paste(input$script_box_feature, "Protein abundance")
+      "Protein abundance"
     }
     group_levels <- levels(df$GroupValue)
     condition_colors <- c(
@@ -5417,19 +6683,21 @@ server <- function(input, output, session) {
         geom_boxplot(outlier.shape = NA, alpha = 0.5, color = "black", width = 0.55)
     }
 
+    point_position <- position_jitter(width = 0.12, height = 0, seed = 1)
     p <- p +
-      geom_jitter(
+      geom_point(
         aes(fill = GroupValue),
         shape = 21,
         color = "black",
         size = input$script_box_point_size,
-        width = 0.12,
-        height = 0,
-        stroke = 0.8
+        position = point_position,
+        stroke = 0.8,
+        alpha = input$script_box_point_opacity
       ) +
       scale_fill_manual(values = condition_colors, drop = FALSE) +
-      labs(title = title_text, y = y_title, x = "Condition", fill = NULL) +
-      theme_classic(base_size = input$script_box_text_size) +
+      facet_wrap(~Feature, scales = "free_y", ncol = script_box_ncol_value) +
+      labs(title = title_text, y = y_title, x = input$script_box_group_by, fill = NULL) +
+      theme_classic(base_size = scaled_text_size) +
       theme(
         axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1, face = "bold", color = "black"),
         axis.text.y = element_text(face = "bold", color = "black"),
@@ -5437,8 +6705,11 @@ server <- function(input, output, session) {
         plot.title = element_text(face = "bold", hjust = 0.5),
         legend.position = "none"
       )
+    if (any(nzchar(df$PointLabel))) {
+      p <- p + geom_text(aes(label = PointLabel), position = point_position, vjust = -0.8, size = scaled_label_size, check_overlap = TRUE, show.legend = FALSE)
+    }
     if (requireNamespace("ggprism", quietly = TRUE)) {
-      p <- p + ggprism::theme_prism(base_size = input$script_box_text_size) +
+      p <- p + ggprism::theme_prism(base_size = scaled_text_size) +
         theme(
           axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1),
           legend.position = "none",
@@ -5475,9 +6746,11 @@ server <- function(input, output, session) {
   })
 
   observeEvent(correlation_expression_data(), {
-    choices <- correlation_expression_data()$Feature
+    expr <- correlation_expression_data()
+    choices <- protein_feature_choices(input$correlation_source, expr)
     current <- isolate(input$correlation_feature)
-    selected <- if (!is.null(current) && current %in% choices) current else choices[1]
+    choice_values <- unname(choices)
+    selected <- if (!is.null(current) && current %in% choice_values) current else choice_values[1]
     updateSelectizeInput(session, "correlation_feature", choices = choices, selected = selected, server = TRUE)
   }, ignoreInit = FALSE)
 
@@ -5487,11 +6760,11 @@ server <- function(input, output, session) {
     sample_metadata_for_plotting(samples)
   })
 
-  observeEvent(correlation_sample_metadata(), {
+  observeEvent(list(correlation_sample_metadata(), downstream_metadata_columns()), {
     md <- correlation_sample_metadata()
-    choices <- setdiff(colnames(md), c("SampleDetailsID", "File Name"))
+    choices <- setdiff(scoped_metadata_columns(md), c("SampleDetailsID", "File Name"))
     choices <- choices[vapply(md[choices], function(values) length(unique(na.omit(as.character(values)))) > 0, logical(1))]
-    group_choices <- c("All samples" = "None", stats::setNames(choices, choices))
+    group_choices <- c("Select grouping field..." = "", "All samples" = "None", stats::setNames(choices, choices))
     current_group_by <- isolate(input$correlation_group_by)
     selected_group_by <- if (!is.null(current_group_by) && current_group_by %in% group_choices) {
       current_group_by
@@ -5502,6 +6775,7 @@ server <- function(input, output, session) {
     } else {
       "None"
     }
+    selected_group_by <- retain_metadata_choice(current_group_by, unname(group_choices), c("Group", "Condition", "None"))
     updateSelectInput(session, "correlation_group_by", choices = group_choices, selected = selected_group_by)
 
     covariate_choices <- choices[!choices %in% c("Sample", "AnalysisLabel")]
@@ -5726,10 +7000,18 @@ server <- function(input, output, session) {
 
   feature_plot_obj <- reactive({
     df <- feature_plot_df()
-    validate(need(nrow(df) > 0, "No numeric abundance values available for this feature."))
+    validate(need(nrow(df) > 0, "No numeric abundance values available for the selected feature(s)."))
 
-    has_group <- "Group" %in% colnames(df)
-    title_text <- if (nzchar(input$feature_plot_title)) input$feature_plot_title else input$feature_select
+    has_group <- "GroupValue" %in% colnames(df)
+    selected_features <- levels(df$Feature)
+    if (is.null(selected_features) || !length(selected_features)) selected_features <- unique(as.character(df$Feature))
+    title_text <- if (nzchar(input$feature_plot_title)) {
+      input$feature_plot_title
+    } else if (length(selected_features) == 1L) {
+      selected_features
+    } else {
+      "Selected proteins"
+    }
 
     fill_var <- switch(
       input$feature_color_mode,
@@ -5739,11 +7021,11 @@ server <- function(input, output, session) {
       "PlotZValue"
     )
     y_axis_title <- if (identical(input$feature_value_scale, "log2")) "Log2 protein abundance" else "Protein abundance"
-    group_text <- if (has_group) as.character(df$Group) else "Not available"
+    group_text <- if (has_group) as.character(df$GroupValue) else "Not available"
     batch_text <- if ("Batch" %in% colnames(df)) as.character(df$Batch) else "Not available"
     condition_text <- if ("Condition" %in% colnames(df)) as.character(df$Condition) else "Not available"
     df$.FeatureHover <- paste0(
-      "Protein: ", input$feature_select,
+      "Protein: ", as.character(df$Feature),
       "<br>Sample: ", as.character(df$Sample),
       "<br>Label: ", as.character(df$DisplayLabel),
       "<br>Value: ", signif(df$PlotValue, 5),
@@ -5752,10 +7034,12 @@ server <- function(input, output, session) {
       "<br>Batch: ", batch_text
     )
 
-    p <- ggplot(df, aes(x = DisplayLabel, y = PlotValue, group = .plot_order, text = .FeatureHover))
+    p <- ggplot(df, aes(x = .BarID, y = PlotValue, group = .plot_order, text = .FeatureHover))
+    bar_labels <- stats::setNames(as.character(df$DisplayLabel), as.character(df$.BarID))
+    p <- p + scale_x_discrete(labels = bar_labels)
 
     if (has_group && input$feature_group_style == "Outline color") {
-      p <- p + geom_col(aes_string(fill = fill_var, color = "Group"),
+      p <- p + geom_col(aes_string(fill = fill_var, color = "GroupValue"),
                         width = input$feature_bar_width, linewidth = 0.7, na.rm = TRUE)
     } else {
       p <- p + geom_col(aes_string(fill = fill_var),
@@ -5763,9 +7047,12 @@ server <- function(input, output, session) {
     }
 
     if (isTRUE(input$show_feature_mean) && any(!is.na(df$PlotValue))) {
-      mean_val <- mean(df$PlotValue, na.rm = TRUE)
-      p <- p + geom_hline(yintercept = mean_val, linetype = "dashed")
-      p <- p + annotate("text", x = 1, y = mean_val, label = "Mean", vjust = -0.4, hjust = 0, size = 3.5)
+      mean_df <- df %>%
+        dplyr::group_by(Feature) %>%
+        dplyr::summarise(MeanValue = mean(PlotValue, na.rm = TRUE), .groups = "drop")
+      p <- p +
+        geom_hline(data = mean_df, aes(yintercept = MeanValue), linetype = "dashed", inherit.aes = FALSE) +
+        geom_text(data = mean_df, aes(x = -Inf, y = MeanValue, label = "Mean"), hjust = -0.1, vjust = -0.4, size = 3.5, inherit.aes = FALSE)
     }
 
     if (input$feature_color_mode %in% c("Z-score", "Centered value")) {
@@ -5794,7 +7081,7 @@ server <- function(input, output, session) {
     }
 
     if (has_group) {
-      group_vals <- unique(as.character(df$Group))
+      group_vals <- unique(as.character(df$GroupValue))
       if (all(c("non_smoker", "cigarette", "ecig", "SPQC") %in% group_vals)) {
         p <- p + scale_color_manual(values = c(
           "non_smoker" = "firebrick3",
@@ -5805,40 +7092,49 @@ server <- function(input, output, session) {
       }
     }
 
+    ncol_value <- suppressWarnings(as.integer(input$feature_plot_ncol))
+    if (is.na(ncol_value) || ncol_value < 1) ncol_value <- 1L
+    text_scale <- facet_text_scale(ncol_value)
+    scaled_feature_text_size <- max(1.8, input$feature_text_size * text_scale)
+    scaled_base_size <- max(8, 13 * text_scale)
+
     if (has_group && input$feature_group_style == "Colored x labels") {
-      label_df <- df
-      label_y <- min(df$PlotValue, na.rm = TRUE) - 0.08 * max(diff(range(df$PlotValue, na.rm = TRUE)), 1)
-      label_df$LabelY <- label_y
+      label_df <- df %>%
+        dplyr::group_by(Feature) %>%
+        dplyr::mutate(LabelY = min(PlotValue, na.rm = TRUE) - 0.08 * max(diff(range(PlotValue, na.rm = TRUE)), 1)) %>%
+        dplyr::ungroup()
 
       p <- p +
         geom_text(
           data = label_df,
-          aes(x = DisplayLabel, y = LabelY, label = DisplayLabel, color = Group),
+          aes(x = .BarID, y = LabelY, label = DisplayLabel, color = GroupValue),
           inherit.aes = FALSE,
           angle = if (isTRUE(input$rotate_feature_labels)) 90 else 0,
           hjust = 1,
           vjust = 0.5,
-          size = input$feature_text_size,
+          size = scaled_feature_text_size,
           show.legend = TRUE
         ) +
-        scale_x_discrete(labels = rep("", nrow(df))) +
+        scale_x_discrete(labels = rep("", nlevels(df$.BarID))) +
         coord_cartesian(clip = "off")
     }
 
-    p + theme_bw(base_size = 13) +
+    p + facet_wrap(~Feature, scales = "free_y", ncol = ncol_value) +
+      theme_bw(base_size = scaled_base_size) +
       labs(title = title_text, x = "", y = y_axis_title) +
       theme(
         axis.text.x = element_text(
           angle = if (isTRUE(input$rotate_feature_labels)) 90 else 0,
           hjust = 1,
           vjust = 0.5,
-          size = input$feature_text_size
+          size = scaled_feature_text_size
         ),
         axis.text = element_text(face = "bold"),
         axis.title = element_text(face = "bold"),
         plot.title = element_text(size = input$feature_title_size, face = "bold", hjust = 0.5),
         legend.title = element_text(face = "bold"),
-        plot.margin = margin(10, 10, 35, 10)
+        plot.margin = margin(10, 10, 35, 10),
+        strip.text = element_text(face = "bold")
       )
   })
 
@@ -5925,7 +7221,8 @@ server <- function(input, output, session) {
   })
 
   output$metadata_build_note <- renderText({
-    built <- built_metadata()
+    built <- draft_metadata()
+    built <- apply_proteomics_metadata_cell_edits(built, spqc_metadata_draft_edits())
     if (is.null(project_file("meta_file")) && is.null(project_file("run_order_file")) && is.null(project_file("sample_details_file"))) {
       return(paste0(
         nrow(built),
@@ -5970,7 +7267,8 @@ server <- function(input, output, session) {
   output$sample_exclusion_note <- renderText({
     terms <- parse_sample_exclusion_text(input$sample_exclusions_text)
     if (length(terms) == 0) return("No global sample exclusions entered.")
-    built <- built_metadata()
+    built <- draft_metadata()
+    built <- apply_proteomics_metadata_cell_edits(built, spqc_metadata_draft_edits())
     excluded_count <- if ("Excluded" %in% colnames(built)) sum(as.logical(built$Excluded), na.rm = TRUE) else 0
     paste0(
       length(terms),
@@ -5981,7 +7279,8 @@ server <- function(input, output, session) {
   })
 
   output$sample_exclusion_preview <- renderDT({
-    built <- built_metadata()
+    built <- draft_metadata()
+    built <- apply_proteomics_metadata_cell_edits(built, spqc_metadata_draft_edits())
     if (!"Excluded" %in% colnames(built)) return(datatable(data.frame(Message = "No metadata loaded."), options = list(dom = "t")))
     excluded <- as.logical(built$Excluded)
     excluded[is.na(excluded)] <- FALSE
@@ -5997,11 +7296,13 @@ server <- function(input, output, session) {
 
   output$project_files_table <- renderDT({
     datatable(
-      project_file_status(),
+      loaded_proteomics_project_status(project_file_status()),
       rownames = FALSE,
       options = list(dom = "t", paging = FALSE, scrollX = TRUE)
     )
   })
+
+  output$metadata_replacement_note <- renderText(metadata_replacement_message())
 
   active_file_note <- function(ids) {
     rows <- project_file_status()
@@ -6160,13 +7461,102 @@ server <- function(input, output, session) {
     )
   })
 
+  locked_metadata_columns <- c("Sample", "RunOrder", "Run Order", "Filename", "FileName", "File Name")
+
   output$metadata_preview <- renderDT({
-    datatable(exported_metadata(), options = list(scrollX = TRUE, pageLength = 15))
+    metadata_editor_revision()
+    table <- draft_metadata()
+    table <- apply_proteomics_metadata_cell_edits(table, isolate(spqc_metadata_draft_edits()))
+    selected <- input$metadata_export_columns
+    view <- prepare_metadata_editor_view(table, selected, locked_metadata_columns)
+    datatable(
+      view$display,
+      rownames = FALSE,
+      editable = list(target = "cell", disable = list(columns = view$locked_indices)),
+      options = list(scrollX = TRUE, pageLength = 15, stateSave = TRUE)
+    )
+  }, server = TRUE)
+
+  output$metadata_apply_status <- renderText({
+    count <- nrow(spqc_metadata_draft_edits())
+    paste(
+      metadata_apply_message(),
+      if (count > 0L) paste0(count, " draft metadata cell change", if (count == 1L) "." else "s.") else NULL
+    )
+  })
+
+  observeEvent(list(
+    input$meta_file,
+    input$run_order_file,
+    input$sample_details_file,
+    input$sample_exclusions_text,
+    input$sample_exclusion_reason,
+    input$spqc_assignment_mode,
+    input$spqc_group_label,
+    input$spqc_group_prefix,
+    input$spqc_batch_overrides,
+    input$metadata_export_columns
+  ), {
+    if (isTRUE(metadata_draft_tracking_enabled())) metadata_apply_message("Unapplied metadata changes.")
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$metadata_preview_cell_edit, {
+    info <- input$metadata_preview_cell_edit
+    draft_edits <- isolate(spqc_metadata_draft_edits())
+    table <- isolate(draft_metadata())
+    table <- apply_proteomics_metadata_cell_edits(table, draft_edits)
+    view <- prepare_metadata_editor_view(table, isolate(input$metadata_export_columns), locked_metadata_columns)
+    table <- view$display
+    column_index <- as.integer(info$col) + 1L
+    if (!nrow(table) || info$row < 1 || info$row > nrow(table) || column_index < 1 || column_index > ncol(table)) return()
+    column <- colnames(table)[column_index]
+    if (column %in% locked_metadata_columns) return()
+    sample <- view$sample_keys[info$row]
+    draft_edits <- draft_edits[!(as.character(draft_edits$Sample) == sample & as.character(draft_edits$Column) == column), , drop = FALSE]
+    draft_edits <- rbind(draft_edits, data.frame(Sample = sample, Column = column, Value = as.character(info$value), stringsAsFactors = FALSE))
+    spqc_metadata_draft_edits(draft_edits)
+    metadata_apply_message("Unapplied metadata changes.")
+  })
+
+  observeEvent(input$apply_metadata_changes, {
+    tryCatch({
+      draft <- draft_metadata()
+      columns <- input$metadata_export_columns
+      if (is.null(columns) || !length(columns)) columns <- metadata_default_columns(colnames(draft))
+      candidate <- build_proteomics_applied_state(
+        metadata = draft,
+        columns = columns,
+        committed_edits = if (isTRUE(spqc_clear_pending())) empty_spqc_metadata_edits() else spqc_metadata_edits(),
+        draft_edits = spqc_metadata_draft_edits()
+      )
+      cache <- invalidate_proteomics_project_cache(project_db_cache(), "meta_file")
+      cache$metadata <- candidate$metadata
+      project_db_cache(cache)
+      cached_batch_corrected_s3_result(NULL)
+      spqc_metadata_edits(candidate$spqc_metadata_edits)
+      spqc_metadata_draft_edits(empty_spqc_metadata_edits())
+      spqc_clear_pending(FALSE)
+      applied_metadata_state(candidate)
+      metadata_apply_revision(isolate(metadata_apply_revision()) + 1L)
+      metadata_apply_message("All metadata changes applied.")
+      autosave_active_project("applied metadata changes", include_derived = FALSE)
+      showNotification("Metadata changes applied to all tabs.", type = "message")
+    }, error = function(e) {
+      metadata_apply_message(paste0("Metadata was not applied: ", conditionMessage(e)))
+      showNotification(conditionMessage(e), type = "error", duration = NULL)
+    })
+  })
+
+  observeEvent(input$discard_metadata_edits, {
+    spqc_metadata_draft_edits(empty_spqc_metadata_edits())
+    spqc_clear_pending(FALSE)
+    metadata_editor_revision(isolate(metadata_editor_revision()) + 1L)
+    metadata_apply_message("Draft metadata edits discarded.")
   })
 
   output$protein_table_note <- renderText({
     notes <- character(0)
-    if (!is.null(project_file("protein_no_impute_file"))) {
+    if (protein_source_available("S2")) {
       s2 <- protein_no_impute_table()
       notes <- c(notes, paste0(
         "Table S2: ", nrow(s2), " proteins; ",
@@ -6176,7 +7566,7 @@ server <- function(input, output, session) {
           if (length(attr(s2, "stats_methods")) > 0) paste0(" Statistics: ", paste(attr(s2, "stats_methods"), collapse = "; "), ".") else ""
       ))
     }
-    if (!is.null(project_file("protein_imputed_file"))) {
+    if (protein_source_available("S3")) {
       s3 <- protein_imputed_table()
       notes <- c(notes, paste0(
         "Table S3: ", nrow(s3), " proteins; ",
@@ -6203,7 +7593,7 @@ server <- function(input, output, session) {
   }
 
   output$protein_no_impute_preview_ui <- renderUI({
-    req(project_file("protein_no_impute_file"))
+    req(protein_source_available("S2"))
     table <- protein_no_impute_table()
     tags$div(
       id = paste0("protein_no_impute_preview_container_", datatable_schema_key(table)),
@@ -6212,7 +7602,7 @@ server <- function(input, output, session) {
   })
 
   output$protein_imputed_preview_ui <- renderUI({
-    req(project_file("protein_imputed_file"))
+    req(protein_source_available("S3"))
     table <- protein_imputed_table()
     tags$div(
       id = paste0("protein_imputed_preview_container_", datatable_schema_key(table)),
@@ -6221,7 +7611,7 @@ server <- function(input, output, session) {
   })
 
   output$protein_no_impute_preview <- renderDT({
-    req(project_file("protein_no_impute_file"))
+    req(protein_source_available("S2"))
     datatable(
       protein_no_impute_table(),
       rownames = FALSE,
@@ -6238,7 +7628,7 @@ server <- function(input, output, session) {
   }, server = TRUE)
 
   output$protein_imputed_preview <- renderDT({
-    req(project_file("protein_imputed_file"))
+    req(protein_source_available("S3"))
     datatable(
       protein_imputed_table(),
       rownames = FALSE,
@@ -6253,6 +7643,10 @@ server <- function(input, output, session) {
       )
     )
   }, server = TRUE)
+
+  output$batch_cache_note <- renderText({
+    batch_cache_message()
+  })
 
   output$batch_correction_note <- renderText({
     result <- tryCatch(batch_corrected_s3_result(), error = function(e) NULL)
@@ -6290,6 +7684,14 @@ server <- function(input, output, session) {
     paste0(max(minimum, round(height_inches * 90)), "px")
   }
 
+  panel_row_count <- function(n_panels, ncol_value) {
+    n_panels <- suppressWarnings(as.integer(n_panels))
+    if (is.na(n_panels) || n_panels < 1) n_panels <- 1L
+    ncol_value <- suppressWarnings(as.integer(ncol_value))
+    if (is.na(ncol_value) || ncol_value < 1) ncol_value <- 1L
+    ceiling(n_panels / ncol_value)
+  }
+
   output$cv_plot_ui <- renderUI({
     plotOutput("cv_plot", height = preview_height(input$cv_figure_height, 300))
   })
@@ -6319,15 +7721,21 @@ server <- function(input, output, session) {
   })
 
   output$feature_plot_ui <- renderUI({
+    n_features <- length(unique(as.character(input$feature_select)))
+    rows <- panel_row_count(max(n_features, 1L), input$feature_plot_ncol)
+    min_height <- 260 * rows
     if (isTRUE(input$feature_interactive)) {
-      plotly::plotlyOutput("feature_plot_interactive", height = preview_height(input$feature_figure_height, 350))
+      plotly::plotlyOutput("feature_plot_interactive", height = preview_height(input$feature_figure_height, min_height))
     } else {
-      plotOutput("feature_plot", height = preview_height(input$feature_figure_height, 350))
+      plotOutput("feature_plot", height = preview_height(input$feature_figure_height, min_height))
     }
   })
 
   output$script_box_plot_ui <- renderUI({
-    plotOutput("script_box_plot", height = preview_height(input$script_box_height, 350))
+    n_features <- length(unique(as.character(input$script_box_features)))
+    rows <- panel_row_count(max(n_features, 1L), input$script_box_ncol)
+    min_height <- 260 * rows
+    plotOutput("script_box_plot", height = preview_height(input$script_box_height, min_height))
   })
 
   output$identification_overview_plot_ui <- renderUI({
@@ -6390,6 +7798,8 @@ server <- function(input, output, session) {
     )
     paste0(
       source_label,
+      ". PCA sample subset included ", result$included_samples, " sample(s) and excluded ",
+      result$excluded_by_subset, " sample(s)",
       ". Retained ", result$retained_features, " of ", result$total_features,
       " proteins at the ", input$clustvis_pca_min_observed_percent,
       "% observed-samples threshold; ", result$missing_values_before_imputation,
@@ -6411,10 +7821,11 @@ server <- function(input, output, session) {
       "S3_batch_corrected" = "Table S3 batch-corrected protein report (corrected log2 abundance)",
       "Table S3 imputed protein report"
     )
+    selected_features <- unique(as.character(df$Feature))
     paste0(
-      "Script-style boxplot for ", input$script_box_feature,
+      "Faceted boxplot for ", length(selected_features), " protein group", if (length(selected_features) == 1L) "" else "s",
       " from ", source_label,
-      " using ", nrow(df), " samples across ",
+      " using ", length(unique(df$Sample)), " samples across ",
       length(unique(as.character(df$GroupValue))), " groups. ",
       style_note, " ",
       if (requireNamespace("ggprism", quietly = TRUE)) "Using ggprism theme." else "Using theme_classic because ggprism is not installed."
@@ -6493,7 +7904,7 @@ server <- function(input, output, session) {
       plotly::ggplotly(feature_plot_obj(), tooltip = "text") %>%
         plotly::layout(dragmode = "zoom")
     })
-    output$script_box_plot <- renderPlot({ req(input$script_box_feature); script_box_plot_obj() }, res = 120)
+    output$script_box_plot <- renderPlot({ req(input$script_box_features); script_box_plot_obj() }, res = 120)
     output$correlation_lollipop_plot <- renderPlot({ req(input$correlation_feature); correlation_lollipop_plot_obj() }, res = 120)
 
     output$correlation_lollipop_plot_ui <- renderUI({
@@ -6599,6 +8010,14 @@ server <- function(input, output, session) {
       out_name <- build_export_filename("Table_S1_Metadata.csv")
       write.csv(exported_metadata(), file, row.names = FALSE, na = "NaN")
       save_download_copy(file, out_name)
+    }
+  )
+
+  output$download_active_metadata <- downloadHandler(
+    filename = function() build_export_filename("active_project_metadata.csv"),
+    content = function(file) {
+      write.csv(built_metadata(), file, row.names = FALSE, na = "")
+      save_download_copy(file, build_export_filename("active_project_metadata.csv"))
     }
   )
 
@@ -6803,10 +8222,10 @@ server <- function(input, output, session) {
       }
 
       add_supplementary_sheet("Table S1. Metadata", metadata_export, with_filter = TRUE)
-      if (!is.null(project_file("protein_no_impute_file"))) {
+      if (protein_source_available("S2")) {
         add_supplementary_sheet("Table S2. Protein, no impute", protein_no_impute_table(), with_filter = isTRUE(input$enable_protein_filters))
       }
-      if (!is.null(project_file("protein_imputed_file"))) {
+      if (protein_source_available("S3")) {
         add_supplementary_sheet("Table S3. Protein, imputed", protein_imputed_table(), with_filter = isTRUE(input$enable_protein_filters))
       }
       openxlsx::saveWorkbook(workbook, file, overwrite = TRUE)
@@ -6862,11 +8281,11 @@ server <- function(input, output, session) {
 
   output$download_gene_set_enrichment_csv <- downloadHandler(
     filename = function() {
-      comparison <- if (is.null(input$gsea_comparison)) "comparison" else sub("\\|\\|\\|", "_vs_", input$gsea_comparison)
+      comparison <- if (is.null(input$gsea_comparison)) "comparison" else stats_comparison_prefix(input$gsea_comparison)
       build_export_filename(paste0("gene_set_enrichment_", comparison, ".csv"))
     },
     content = function(file) {
-      comparison <- if (is.null(input$gsea_comparison)) "comparison" else sub("\\|\\|\\|", "_vs_", input$gsea_comparison)
+      comparison <- if (is.null(input$gsea_comparison)) "comparison" else stats_comparison_prefix(input$gsea_comparison)
       out_name <- build_export_filename(paste0("gene_set_enrichment_", comparison, ".csv"))
       write.csv(gene_set_enrichment_data(), file, row.names = FALSE, na = "NaN")
       save_download_copy(file, out_name)
@@ -6875,11 +8294,11 @@ server <- function(input, output, session) {
 
   output$download_gene_set_enrichment_png <- downloadHandler(
     filename = function() {
-      comparison <- if (is.null(input$gsea_comparison)) "comparison" else sub("\\|\\|\\|", "_vs_", input$gsea_comparison)
+      comparison <- if (is.null(input$gsea_comparison)) "comparison" else stats_comparison_prefix(input$gsea_comparison)
       build_export_filename(paste0("gene_set_enrichment_", comparison, ".png"))
     },
     content = function(file) {
-      comparison <- if (is.null(input$gsea_comparison)) "comparison" else sub("\\|\\|\\|", "_vs_", input$gsea_comparison)
+      comparison <- if (is.null(input$gsea_comparison)) "comparison" else stats_comparison_prefix(input$gsea_comparison)
       out_name <- build_export_filename(paste0("gene_set_enrichment_", comparison, ".png"))
       ggsave(file, plot = gene_set_enrichment_plot_obj(), width = input$gsea_plot_width, height = input$gsea_plot_height, dpi = 300)
       save_download_copy(file, out_name)
@@ -6888,12 +8307,12 @@ server <- function(input, output, session) {
 
   output$download_gene_set_enrichment_svg <- downloadHandler(
     filename = function() {
-      comparison <- if (is.null(input$gsea_comparison)) "comparison" else sub("\\|\\|\\|", "_vs_", input$gsea_comparison)
+      comparison <- if (is.null(input$gsea_comparison)) "comparison" else stats_comparison_prefix(input$gsea_comparison)
       build_export_filename(paste0("gene_set_enrichment_", comparison, ".svg"))
     },
     content = function(file) {
       validate(need(requireNamespace("svglite", quietly = TRUE), "Install the R package 'svglite' to download SVG files."))
-      comparison <- if (is.null(input$gsea_comparison)) "comparison" else sub("\\|\\|\\|", "_vs_", input$gsea_comparison)
+      comparison <- if (is.null(input$gsea_comparison)) "comparison" else stats_comparison_prefix(input$gsea_comparison)
       out_name <- build_export_filename(paste0("gene_set_enrichment_", comparison, ".svg"))
       ggsave(file, plot = gene_set_enrichment_plot_obj(), width = input$gsea_plot_width, height = input$gsea_plot_height, device = svglite::svglite)
       save_download_copy(file, out_name)
@@ -6901,38 +8320,62 @@ server <- function(input, output, session) {
   )
 
   output$download_feature_png <- downloadHandler(
-    filename = function() build_export_filename(paste0(gsub("[^A-Za-z0-9_\\-]", "_", input$feature_select), "_barplot.png")),
+    filename = function() {
+      features <- as.character(input$feature_select)
+      stem <- if (length(features) == 1L) gsub("[^A-Za-z0-9_\\-]", "_", features) else paste0(length(features), "_proteins")
+      build_export_filename(paste0(stem, "_barplot.png"))
+    },
     content = function(file) {
-      out_name <- build_export_filename(paste0(gsub("[^A-Za-z0-9_\\-]", "_", input$feature_select), "_barplot.png"))
+      features <- as.character(input$feature_select)
+      stem <- if (length(features) == 1L) gsub("[^A-Za-z0-9_\\-]", "_", features) else paste0(length(features), "_proteins")
+      out_name <- build_export_filename(paste0(stem, "_barplot.png"))
       ggsave(file, plot = feature_plot_obj(), width = input$feature_figure_width, height = input$feature_figure_height, dpi = 600)
       save_download_copy(file, out_name)
     }
   )
 
   output$download_feature_svg <- downloadHandler(
-    filename = function() build_export_filename(paste0(gsub("[^A-Za-z0-9_\\-]", "_", input$feature_select), "_barplot.svg")),
+    filename = function() {
+      features <- as.character(input$feature_select)
+      stem <- if (length(features) == 1L) gsub("[^A-Za-z0-9_\\-]", "_", features) else paste0(length(features), "_proteins")
+      build_export_filename(paste0(stem, "_barplot.svg"))
+    },
     content = function(file) {
       validate(need(requireNamespace("svglite", quietly = TRUE), "Install the R package 'svglite' to download SVG files."))
-      out_name <- build_export_filename(paste0(gsub("[^A-Za-z0-9_\\-]", "_", input$feature_select), "_barplot.svg"))
+      features <- as.character(input$feature_select)
+      stem <- if (length(features) == 1L) gsub("[^A-Za-z0-9_\\-]", "_", features) else paste0(length(features), "_proteins")
+      out_name <- build_export_filename(paste0(stem, "_barplot.svg"))
       ggsave(file, plot = feature_plot_obj(), width = input$feature_figure_width, height = input$feature_figure_height, device = svglite::svglite)
       save_download_copy(file, out_name)
     }
   )
 
   output$download_script_box_png <- downloadHandler(
-    filename = function() build_export_filename(paste0(gsub("[^A-Za-z0-9_\\-]", "_", input$script_box_feature), "_script_boxplot.png")),
+    filename = function() {
+      features <- as.character(input$script_box_features)
+      stem <- if (length(features) == 1L) gsub("[^A-Za-z0-9_\\-]", "_", features) else paste0(length(features), "_protein_groups")
+      build_export_filename(paste0(stem, "_script_boxplot.png"))
+    },
     content = function(file) {
-      out_name <- build_export_filename(paste0(gsub("[^A-Za-z0-9_\\-]", "_", input$script_box_feature), "_script_boxplot.png"))
+      features <- as.character(input$script_box_features)
+      stem <- if (length(features) == 1L) gsub("[^A-Za-z0-9_\\-]", "_", features) else paste0(length(features), "_protein_groups")
+      out_name <- build_export_filename(paste0(stem, "_script_boxplot.png"))
       ggsave(file, plot = script_box_plot_obj(), width = input$script_box_width, height = input$script_box_height, dpi = 600)
       save_download_copy(file, out_name)
     }
   )
 
   output$download_script_box_svg <- downloadHandler(
-    filename = function() build_export_filename(paste0(gsub("[^A-Za-z0-9_\\-]", "_", input$script_box_feature), "_script_boxplot.svg")),
+    filename = function() {
+      features <- as.character(input$script_box_features)
+      stem <- if (length(features) == 1L) gsub("[^A-Za-z0-9_\\-]", "_", features) else paste0(length(features), "_protein_groups")
+      build_export_filename(paste0(stem, "_script_boxplot.svg"))
+    },
     content = function(file) {
       validate(need(requireNamespace("svglite", quietly = TRUE), "Install the R package 'svglite' to download SVG files."))
-      out_name <- build_export_filename(paste0(gsub("[^A-Za-z0-9_\\-]", "_", input$script_box_feature), "_script_boxplot.svg"))
+      features <- as.character(input$script_box_features)
+      stem <- if (length(features) == 1L) gsub("[^A-Za-z0-9_\\-]", "_", features) else paste0(length(features), "_protein_groups")
+      out_name <- build_export_filename(paste0(stem, "_script_boxplot.svg"))
       ggsave(file, plot = script_box_plot_obj(), width = input$script_box_width, height = input$script_box_height, device = svglite::svglite)
       save_download_copy(file, out_name)
     }
@@ -7053,11 +8496,11 @@ server <- function(input, output, session) {
 
   output$download_volcano_png <- downloadHandler(
     filename = function() {
-      comparison <- if (is.null(input$volcano_comparison)) "comparison" else sub("\\|\\|\\|", "_vs_", input$volcano_comparison)
+      comparison <- if (is.null(input$volcano_comparison)) "comparison" else stats_comparison_prefix(input$volcano_comparison)
       build_export_filename(paste0("volcano_", comparison, ".png"))
     },
     content = function(file) {
-      comparison <- if (is.null(input$volcano_comparison)) "comparison" else sub("\\|\\|\\|", "_vs_", input$volcano_comparison)
+      comparison <- if (is.null(input$volcano_comparison)) "comparison" else stats_comparison_prefix(input$volcano_comparison)
       out_name <- build_export_filename(paste0("volcano_", comparison, ".png"))
       ggsave(file, plot = volcano_plot_obj(), width = input$volcano_figure_width, height = input$volcano_figure_height, dpi = 300)
       save_download_copy(file, out_name)
@@ -7066,12 +8509,12 @@ server <- function(input, output, session) {
 
   output$download_volcano_svg <- downloadHandler(
     filename = function() {
-      comparison <- if (is.null(input$volcano_comparison)) "comparison" else sub("\\|\\|\\|", "_vs_", input$volcano_comparison)
+      comparison <- if (is.null(input$volcano_comparison)) "comparison" else stats_comparison_prefix(input$volcano_comparison)
       build_export_filename(paste0("volcano_", comparison, ".svg"))
     },
     content = function(file) {
       validate(need(requireNamespace("svglite", quietly = TRUE), "Install the R package 'svglite' to download SVG files."))
-      comparison <- if (is.null(input$volcano_comparison)) "comparison" else sub("\\|\\|\\|", "_vs_", input$volcano_comparison)
+      comparison <- if (is.null(input$volcano_comparison)) "comparison" else stats_comparison_prefix(input$volcano_comparison)
       out_name <- build_export_filename(paste0("volcano_", comparison, ".svg"))
       ggsave(file, plot = volcano_plot_obj(), width = input$volcano_figure_width, height = input$volcano_figure_height, device = svglite::svglite)
       save_download_copy(file, out_name)
@@ -7080,7 +8523,7 @@ server <- function(input, output, session) {
 
   output$download_volcano_html <- downloadHandler(
     filename = function() {
-      comparison <- if (is.null(input$volcano_comparison)) "comparison" else sub("\\|\\|\\|", "_vs_", input$volcano_comparison)
+      comparison <- if (is.null(input$volcano_comparison)) "comparison" else stats_comparison_prefix(input$volcano_comparison)
       build_export_filename(paste0("volcano_interactive_", comparison, ".zip"))
     },
     content = function(file) {
@@ -7090,7 +8533,7 @@ server <- function(input, output, session) {
       html_file <- file.path(interactive_dir, "volcano_interactive.html")
       htmlwidgets::saveWidget(volcano_interactive_obj(), file = html_file, selfcontained = FALSE)
       zip::zipr(file, list.files(interactive_dir, recursive = TRUE, full.names = TRUE), root = interactive_dir)
-      comparison <- if (is.null(input$volcano_comparison)) "comparison" else sub("\\|\\|\\|", "_vs_", input$volcano_comparison)
+      comparison <- if (is.null(input$volcano_comparison)) "comparison" else stats_comparison_prefix(input$volcano_comparison)
       save_download_copy(file, build_export_filename(paste0("volcano_interactive_", comparison, ".zip")))
     }
   )
