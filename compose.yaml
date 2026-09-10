@@ -1,0 +1,22 @@
+services:
+  proteomics-data-workup:
+    build:
+      context: .
+    container_name: proteomics-data-workup
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6875:3838"
+    environment:
+      TMPDIR: /tmp
+    tmpfs:
+      - /tmp:size=8G,mode=1777
+    healthcheck:
+      test:
+        - CMD
+        - Rscript
+        - -e
+        - "con <- url('http://127.0.0.1:3838/'); open(con); close(con)"
+      interval: "30s"
+      timeout: "10s"
+      retries: 5
+      start_period: "30s"

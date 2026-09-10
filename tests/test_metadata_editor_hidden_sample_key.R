@@ -5,13 +5,13 @@ sys.source(app_path, envir = app_env)
 metadata <- data.frame(
   Sample = c("sample_1", "sample_2"),
   RunOrder = c(2, 1),
-  Condition = c("Control", "Case"),
+  Condition = c("Control", "Saos2 Nuc SEL &amp; BRT 1-2"),
   stringsAsFactors = FALSE
 )
 
 view <- app_env$prepare_metadata_editor_view(metadata, "Condition")
 stopifnot(identical(colnames(view$display), "Condition"))
 stopifnot(identical(view$sample_keys, c("sample_2", "sample_1")))
-stopifnot(identical(as.character(view$display$Condition), c("Case", "Control")))
+stopifnot(identical(as.character(view$display$Condition), c("Saos2 Nuc SEL & BRT 1-2", "Control")))
 
 cat("Metadata editor retains hidden sample keys in displayed row order.\n")

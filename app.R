@@ -104,7 +104,7 @@ project_input_table <- function(file_info, cached_table = NULL) {
 }
 
 prepare_metadata_editor_view <- function(metadata, selected_columns, locked_columns = character(0)) {
-  metadata <- as.data.frame(metadata, stringsAsFactors = FALSE, check.names = FALSE)
+  metadata <- normalize_proteomics_metadata(metadata)
   if (!"Sample" %in% colnames(metadata)) stop("Metadata must contain a Sample column.", call. = FALSE)
   selected_columns <- as.character(selected_columns)
   selected_columns <- selected_columns[selected_columns %in% colnames(metadata)]
@@ -1968,15 +1968,18 @@ server <- function(input, output, session) {
   }
 
   save_download_copy <- function(file, filename) {
-    if (!isTRUE(input$save_download_copy)) return(invisible(FALSE))
-    destination_dir <- download_destination_path()
-    validate(
-      need(!is.na(destination_dir) && nzchar(destination_dir), "Enter a destination folder before saving a download copy."),
-      need(dir.exists(destination_dir), paste0("Download destination folder does not exist: ", destination_dir))
-    )
+    destination <- proteomics_download_copy_destination(input$save_download_copy, input$download_destination_dir)
+    if (!isTRUE(destination$copy)) {
+      if (nzchar(destination$message)) download_destination_message(destination$message)
+      return(invisible(FALSE))
+    }
+    destination_dir <- destination$path
     destination_file <- unique_destination_file(destination_dir, filename)
     copied <- file.copy(file, destination_file, overwrite = FALSE)
-    validate(need(isTRUE(copied) && file.exists(destination_file), paste0("Could not copy export to: ", destination_file)))
+    if (!isTRUE(copied) || !file.exists(destination_file)) {
+      download_destination_message(paste0("Browser download completed; additional folder copy could not be written to: ", destination_file))
+      return(invisible(FALSE))
+    }
     download_destination_message(paste0("Saved copy: ", destination_file))
     invisible(TRUE)
   }
@@ -3474,7 +3477,16 @@ observeEvent(input$save_active_project, {
     md <- tryCatch(built_metadata(), error = function(e) NULL)
     if (is.null(md) || !"Sample" %in% colnames(md)) return(proteomics_abundance_sample_names(abundance_columns))
     header_labels <- protein_header_labels_from_metadata(md, input$protein_header_label_columns)
-    restore_proteomics_sample_names(abundance_columns, md$Sample, header_labels)
+    labels <- proteomics_abundance_sample_names(abundance_columns)
+    if (!any(endsWith(abundance_columns, "_Protein_group_abundance"))) return(labels)
+    resolved <- resolve_proteomics_processed_sample_ids(
+      labels,
+      md,
+      header_labels,
+      project_db_cache()$processed_sample_map
+    )
+    labels[!is.na(resolved)] <- resolved[!is.na(resolved)]
+    labels
   }
 
   expression_data <- reactive({
@@ -4318,7 +4330,12 @@ observeEvent(draft_metadata(), {
     run_labels[abundance] <- sub("\\.PG\\.Quantity$", "", run_labels[abundance])
     run_labels[abundance] <- sub("_Protein_group_abundance$", "", run_labels[abundance])
     sample_ids <- run_labels
-    sample_ids[processed_measurement] <- as.character(md$Sample[match(run_labels[processed_measurement], header_labels)])
+    sample_ids[processed_measurement] <- resolve_proteomics_processed_sample_ids(
+      run_labels[processed_measurement],
+      md,
+      header_labels,
+      project_db_cache()$processed_sample_map
+    )
     matched <- (precursor | abundance) & !is.na(sample_ids) & sample_ids %in% names(label_by_run)
 
     replacement_names <- original_names
@@ -4464,6 +4481,13 @@ observeEvent(draft_metadata(), {
     attr(report, "cv_conditions") <- selected_conditions
     attr(report, "stats_comparison") <- stats_comparison_labels
     attr(report, "stats_methods") <- stats_method_notes
+    mapped_samples <- unique(as.character(measurement_info$sample_id))
+    mapped_samples <- mapped_samples[!is.na(mapped_samples) & mapped_samples %in% as.character(md$Sample)]
+    attr(report, "sample_map") <- data.frame(
+      Sample = mapped_samples,
+      HeaderLabel = unname(label_by_run[mapped_samples]),
+      stringsAsFactors = FALSE
+    )
     report
   }
 
@@ -4987,12 +5011,15 @@ observeEvent(draft_metadata(), {
     validate(need(!is.na(p_value_col) && fold_change_col %in% colnames(report), "Select a statistics comparison for the volcano plot."))
 
     p_value <- suppressWarnings(as.numeric(report[[p_value_col]]))
-    fdr <- if (fdr_col %in% colnames(report)) {
+    fdr <- if (!isTRUE(input$stats_bh_fdr)) {
+      rep(NA_real_, length(p_value))
+    } else if (fdr_col %in% colnames(report)) {
       suppressWarnings(as.numeric(report[[fdr_col]]))
     } else {
       stats::p.adjust(p_value, method = "BH")
     }
-    metric <- if (input$volcano_significance_metric == "BH_FDR") fdr else p_value
+    metric_name <- if (isTRUE(input$stats_bh_fdr)) input$volcano_significance_metric else "p_value"
+    metric <- if (identical(metric_name, "BH_FDR")) fdr else p_value
     source <- volcano_source_table()
     label_col <- input$volcano_label_col
     if (is.null(label_col) || !label_col %in% colnames(source)) label_col <- colnames(source)[1]
@@ -5073,7 +5100,7 @@ observeEvent(draft_metadata(), {
       fold_change <- suppressWarnings(as.numeric(report[[fold_change_col]]))
       p_value <- suppressWarnings(as.numeric(report[[p_value_col]]))
       fdr <- if (fdr_col %in% colnames(report)) suppressWarnings(as.numeric(report[[fdr_col]])) else stats::p.adjust(p_value, method = "BH")
-      metric_values <- list("BH FDR" = fdr, "p-value" = p_value)
+      metric_values <- volcano_significance_metric_values(p_value, fdr, input$stats_bh_fdr)
       dplyr::bind_rows(lapply(names(metric_values), function(metric_name) {
         significance <- metric_values[[metric_name]]
         is_significant <- is.finite(significance) &
@@ -5129,7 +5156,7 @@ observeEvent(draft_metadata(), {
     data <- volcano_plot_data() %>%
       dplyr::filter(is.finite(Log2FoldChange), is.finite(MinusLog10Significance))
     validate(need(nrow(data) > 0, "No finite statistics are available for this volcano plot."))
-    metric_label <- if (input$volcano_significance_metric == "BH_FDR") "BH FDR" else "p-value"
+    metric_label <- if (isTRUE(input$stats_bh_fdr) && input$volcano_significance_metric == "BH_FDR") "BH FDR" else "p-value"
     comparison_label <- stats_comparison_label(input$volcano_comparison)
     count_subtitle <- volcano_count_subtitle(data)
     cutoff_subtitle <- paste0(comparison_label, "; cutoffs: |log2 FC| >= ", input$volcano_fc_cutoff, " and ", metric_label, " <= ", input$volcano_sig_cutoff)
@@ -5191,7 +5218,7 @@ observeEvent(draft_metadata(), {
     validate(need(requireNamespace("plotly", quietly = TRUE), "Install the R package 'plotly' to show or export the interactive volcano plot."))
     data <- volcano_plot_data() %>%
       dplyr::filter(is.finite(Log2FoldChange), is.finite(MinusLog10Significance))
-    metric_label <- if (input$volcano_significance_metric == "BH_FDR") "BH FDR" else "p-value"
+    metric_label <- if (isTRUE(input$stats_bh_fdr) && input$volcano_significance_metric == "BH_FDR") "BH FDR" else "p-value"
     comparison_label <- stats_comparison_label(input$volcano_comparison)
     count_subtitle <- volcano_count_subtitle(data)
     cutoff_subtitle <- paste0(comparison_label, "; cutoffs: |log2 FC| >= ", input$volcano_fc_cutoff, " and ", metric_label, " <= ", input$volcano_sig_cutoff)
@@ -5202,7 +5229,7 @@ observeEvent(draft_metadata(), {
       "<br>Status: ", data$Status,
       "<br>log2 fold-change: ", signif(data$Log2FoldChange, 4),
       "<br>p-value: ", signif(data$PValue, 4),
-      "<br>BH FDR: ", signif(data$BH_FDR, 4)
+      if (isTRUE(input$stats_bh_fdr)) paste0("<br>BH FDR: ", signif(data$BH_FDR, 4)) else ""
     )
     widget <- plotly::plot_ly(
       data,
@@ -7513,7 +7540,7 @@ observeEvent(draft_metadata(), {
     if (column %in% locked_metadata_columns) return()
     sample <- view$sample_keys[info$row]
     draft_edits <- draft_edits[!(as.character(draft_edits$Sample) == sample & as.character(draft_edits$Column) == column), , drop = FALSE]
-    draft_edits <- rbind(draft_edits, data.frame(Sample = sample, Column = column, Value = as.character(info$value), stringsAsFactors = FALSE))
+    draft_edits <- rbind(draft_edits, data.frame(Sample = sample, Column = column, Value = normalize_proteomics_text(info$value), stringsAsFactors = FALSE))
     spqc_metadata_draft_edits(draft_edits)
     metadata_apply_message("Unapplied metadata changes.")
   })
@@ -7977,8 +8004,12 @@ observeEvent(draft_metadata(), {
 
     output$volcano_hits_table <- renderDT({
       data <- volcano_hits_data()
+      display_columns <- volcano_hits_display_columns(
+        c("Protein", "ProteinName", "ProteinDescription", "Status", "Log2FoldChange", "PValue", "BH_FDR"),
+        input$stats_bh_fdr
+      )
       datatable(
-        data[, c("Protein", "ProteinName", "ProteinDescription", "Status", "Log2FoldChange", "PValue", "BH_FDR"), drop = FALSE],
+        data[, display_columns, drop = FALSE],
         rownames = FALSE,
         selection = list(mode = "multiple", selected = NULL, target = "row"),
         options = list(scrollX = TRUE, pageLength = 10)

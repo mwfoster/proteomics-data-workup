@@ -3,6 +3,9 @@ source(if (file.exists("selection_helpers.R")) "selection_helpers.R" else "../se
 values <- c("SEL & BRT", "SEL &amp; BRT", "SEL &#38; BRT", "SEL &#x26; BRT")
 stopifnot(identical(normalize_proteomics_text(values), rep("SEL & BRT", 4)))
 
+nbsp_value <- paste0("Saos2\u00a0Nuc SEL &amp; BRT 1-2")
+stopifnot(identical(normalize_proteomics_text(nbsp_value), "Saos2 Nuc SEL & BRT 1-2"))
+
 metadata <- data.frame(
   Sample = c("S1", "S2"),
   Condition = c("SEL &amp; BRT", "Veh"),

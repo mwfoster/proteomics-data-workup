@@ -90,6 +90,18 @@ proteomics_multiselect_options <- function(placeholder = NULL, drag = FALSE, ...
   c(options, list(...))
 }
 
+proteomics_download_copy_destination <- function(enabled, path) {
+  if (!isTRUE(enabled)) return(list(copy = FALSE, path = NA_character_, message = ""))
+  path <- trimws(as.character(path)[1L])
+  if (is.na(path) || !nzchar(path)) {
+    return(list(copy = FALSE, path = NA_character_, message = "Additional folder copy skipped: no destination folder is configured."))
+  }
+  if (!dir.exists(path)) {
+    return(list(copy = FALSE, path = path, message = paste0("Additional folder copy skipped because the destination does not exist on this server: ", path)))
+  }
+  list(copy = TRUE, path = normalizePath(path, winslash = "/", mustWork = TRUE), message = "")
+}
+
 stats_comparison_selectize_options <- function() {
   proteomics_multiselect_options(
     "Type a condition or metadata field to find comparisons",
@@ -119,6 +131,15 @@ facet_text_scale <- function(columns_per_row) {
   0.7
 }
 
+volcano_hits_display_columns <- function(columns, include_fdr) {
+  columns <- as.character(columns)
+  if (isTRUE(include_fdr)) columns else setdiff(columns, "BH_FDR")
+}
+
+volcano_significance_metric_values <- function(p_value, fdr, include_fdr) {
+  if (isTRUE(include_fdr)) list("BH FDR" = fdr, "p-value" = p_value) else list("p-value" = p_value)
+}
+
 cv_sample_groups <- function(metadata, group_col, samples) {
   metadata <- unique_sample_metadata(metadata)
   samples <- as.character(samples)
@@ -129,6 +150,7 @@ cv_sample_groups <- function(metadata, group_col, samples) {
 
 normalize_proteomics_text <- function(value) {
   value <- as.character(value)
+  value <- gsub("[\u00a0\u2007\u202f]", " ", value, perl = TRUE)
   for (iteration in seq_len(3L)) {
     normalized <- gsub("&#x0*26;", "&", value, ignore.case = TRUE)
     normalized <- gsub("&#0*38;", "&", normalized, ignore.case = TRUE)
@@ -144,6 +166,46 @@ normalize_proteomics_metadata <- function(metadata) {
   text_columns <- vapply(metadata, function(column) is.character(column) || is.factor(column), logical(1))
   metadata[text_columns] <- lapply(metadata[text_columns], normalize_proteomics_text)
   metadata
+}
+
+resolve_proteomics_processed_sample_ids <- function(run_labels, metadata, current_header_labels, saved_sample_map = NULL) {
+  metadata <- normalize_proteomics_metadata(metadata)
+  run_labels <- trimws(normalize_proteomics_text(run_labels))
+  current_header_labels <- trimws(normalize_proteomics_text(current_header_labels))
+  resolved <- rep(NA_character_, length(run_labels))
+  if (!"Sample" %in% colnames(metadata) || length(current_header_labels) != nrow(metadata)) return(resolved)
+
+  sample_ids <- as.character(metadata$Sample)
+  current_match <- match(run_labels, current_header_labels)
+  resolved[!is.na(current_match)] <- sample_ids[current_match[!is.na(current_match)]]
+
+  if (is.data.frame(saved_sample_map) && all(c("Sample", "HeaderLabel") %in% colnames(saved_sample_map))) {
+    saved_labels <- trimws(normalize_proteomics_text(saved_sample_map$HeaderLabel))
+    saved_samples <- as.character(saved_sample_map$Sample)
+    valid <- !is.na(saved_labels) & nzchar(saved_labels) & !duplicated(saved_labels) & !duplicated(saved_labels, fromLast = TRUE)
+    saved_lookup <- stats::setNames(saved_samples[valid], saved_labels[valid])
+    missing <- is.na(resolved)
+    resolved[missing] <- unname(saved_lookup[run_labels[missing]])
+  }
+
+  missing <- is.na(resolved)
+  if (any(missing)) {
+    text_columns <- colnames(metadata)[vapply(metadata, function(column) is.character(column) || is.factor(column), logical(1))]
+    aliases <- do.call(rbind, lapply(text_columns, function(column) {
+      data.frame(
+        label = trimws(normalize_proteomics_text(metadata[[column]])),
+        Sample = sample_ids,
+        stringsAsFactors = FALSE
+      )
+    }))
+    aliases <- aliases[!is.na(aliases$label) & nzchar(aliases$label) & !is.na(aliases$Sample) & nzchar(aliases$Sample), , drop = FALSE]
+    aliases <- unique(aliases)
+    unique_alias <- !duplicated(aliases$label) & !duplicated(aliases$label, fromLast = TRUE)
+    alias_lookup <- stats::setNames(aliases$Sample[unique_alias], aliases$label[unique_alias])
+    resolved[missing] <- unname(alias_lookup[run_labels[missing]])
+  }
+
+  resolved
 }
 
 stats_comparison_component <- function(value) gsub("[^A-Za-z0-9]+", "_", trimws(normalize_proteomics_text(value)))

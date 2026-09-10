@@ -1,0 +1,13 @@
+.git
+.gitignore
+tests
+docs
+*.duckdb
+*.db
+*.rds
+*.zip
+*.csv
+*.tsv
+*.xlsx
+.Rhistory
+.RData
