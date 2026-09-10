@@ -1,9 +1,18 @@
 compose <- paste(readLines("compose.yaml", warn = FALSE), collapse = "\n")
+readme <- paste(readLines("README.md", warn = FALSE), collapse = "\n")
+vm_guide <- paste(readLines("VM-DEPLOYMENT.md", warn = FALSE), collapse = "\n")
+public_docs <- paste(readme, vm_guide, sep = "\n")
 
 stopifnot(!grepl("caddy:", compose, fixed = TRUE))
 stopifnot(grepl('"127.0.0.1:6875:3838"', compose, fixed = TRUE))
 stopifnot(!grepl('"0.0.0.0:3838:3838"', compose, fixed = TRUE))
 stopifnot(grepl("Rscript", compose, fixed = TRUE))
 stopifnot(!grepl('"curl"', compose, fixed = TRUE))
+stopifnot(grepl("VM-DEPLOYMENT.md", readme, fixed = TRUE))
+stopifnot(grepl("client_max_body_size", vm_guide, fixed = TRUE))
+stopifnot(grepl("your-vm.example.org", vm_guide, fixed = TRUE))
+stopifnot(!grepl("rapid-2905", public_docs, fixed = TRUE))
+stopifnot(!grepl("rapiduser", public_docs, fixed = TRUE))
+stopifnot(!grepl("duke.edu", public_docs, fixed = TRUE))
 
 cat("VM nginx deployment configuration tests passed.\n")

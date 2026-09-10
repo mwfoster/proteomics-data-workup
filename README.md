@@ -28,3 +28,16 @@ source("run_app.R")
 ```
 
 DuckDB project files can be opened from the app. Use the app's project download control to save a new or updated project to your computer.
+
+## Run on an Ubuntu VM with Docker
+
+The repository includes a `Dockerfile` and `compose.yaml`. On an Ubuntu VM with Docker and the Docker Compose plugin installed, run:
+
+```bash
+git clone https://github.com/mwfoster/proteomics-data-workup.git
+cd proteomics-data-workup
+docker compose up -d --build
+docker compose ps
+```
+
+The container listens only on `127.0.0.1:6875` on the VM so it can be published securely through a reverse proxy. See [VM-DEPLOYMENT.md](VM-DEPLOYMENT.md) for nginx, HTTPS, large DuckDB uploads, logs, and update instructions.
