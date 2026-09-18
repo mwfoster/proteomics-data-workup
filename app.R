@@ -40,6 +40,27 @@ condition_replicate_label <- function(condition, replicate, fallback) {
   out
 }
 
+identification_metadata_labels <- function(overview, metadata, selected_columns, fallback) {
+  fallback <- as.character(fallback)
+  selected_columns <- intersect(as.character(selected_columns), colnames(metadata))
+  if (!length(selected_columns) || !all(c("Condition", "Replicate") %in% colnames(overview)) ||
+      !all(c("Condition", "Replicate") %in% colnames(metadata))) return(fallback)
+
+  key <- function(data) paste(trimws(as.character(data$Condition)), trimws(as.character(data$Replicate)), sep = "\r")
+  metadata_labels <- vapply(seq_len(nrow(metadata)), function(index) {
+    parts <- trimws(as.character(metadata[index, selected_columns, drop = TRUE]))
+    parts <- parts[!is.na(parts) & nzchar(parts)]
+    if (length(parts)) paste(parts, collapse = "_") else ""
+  }, character(1))
+  metadata_keys <- key(metadata)
+  keep <- !duplicated(metadata_keys)
+  label_by_key <- stats::setNames(metadata_labels[keep], metadata_keys[keep])
+  labels <- unname(label_by_key[key(overview)])
+  usable <- !is.na(labels) & nzchar(labels)
+  fallback[usable] <- labels[usable]
+  fallback
+}
+
 parse_sample_exclusion_text <- function(text) {
   if (is.null(text) || !nzchar(trimws(as.character(text)[1]))) return(character(0))
   values <- unlist(strsplit(as.character(text)[1], "[\r\n]+"))
@@ -1834,6 +1855,14 @@ ui <- fluidPage(
                   choices = c("Precursors" = "Precursors", "Protein groups" = "ProteinGroups"),
                   selected = "Precursors"
                 ),
+              selectizeInput(
+                "run_identifications_label_columns",
+                "Label samples by metadata",
+                choices = character(0),
+                selected = character(0),
+                multiple = TRUE,
+                options = list(plugins = list("remove_button"), placeholder = "Current Condition_Replicate label")
+              ),
               textInput("identification_overview_title", "Overview plot title", value = "Identifications per Run"),
               textInput("run_identifications_title", "Stacked plot title", value = "Run Identifications"),
               numericInput("identification_title_size", "Plot title size", value = 13, min = 6, max = 36, step = 1),
@@ -2242,7 +2271,7 @@ protein_stats_paused <- reactiveVal(FALSE)
       "correlation_covariates", "correlation_rank_by", "correlation_top_n", "correlation_exclude_reference",
       "correlation_plot_title", "correlation_figure_width", "correlation_figure_height",
       "identification_metric", "identification_overview_title",
-      "run_identifications_title", "identification_title_size",
+      "run_identifications_title", "run_identifications_label_columns", "identification_title_size",
       "identification_axis_text_size", "identification_legend_size",
       "identification_overview_width", "identification_overview_height",
       "run_identifications_width", "run_identifications_height"
@@ -2358,7 +2387,7 @@ protein_stats_paused <- reactiveVal(FALSE)
       "cv_plot_conditions", "clustvis_pca_subset_values",
       "feature_select", "script_box_features",
       "clustvis_pca_opacity_override_groups", "correlation_feature",
-      "correlation_groups", "correlation_covariates"
+      "correlation_groups", "correlation_covariates", "run_identifications_label_columns"
     )
     for (id in update_text) if (!is.null(settings[[id]])) updateTextInput(session, id, value = settings[[id]])
     for (id in update_numeric) if (!is.null(settings[[id]])) updateNumericInput(session, id, value = settings[[id]])
@@ -5694,6 +5723,27 @@ observeEvent(draft_metadata(), {
       )
   })
 
+  observe({
+    md <- tryCatch(active_metadata(), error = function(e) NULL)
+    choices <- if (is.null(md) || !nrow(md)) {
+      character(0)
+    } else {
+      setdiff(scoped_metadata_columns(md), c("SampleDetailsID", "Excluded", "ExclusionReason"))
+    }
+    current <- isolate(input$run_identifications_label_columns)
+    selected <- current[current %in% choices]
+    saved <- unlist(restored_project_settings()$run_identifications_label_columns, use.names = FALSE)
+    saved <- saved[saved %in% choices]
+    if (is.null(current) && length(saved)) selected <- saved
+    updateSelectizeInput(
+      session,
+      "run_identifications_label_columns",
+      choices = choices,
+      selected = selected,
+      server = FALSE
+    )
+  })
+
   identifications_overview_data <- reactive({
     data <- project_input_table(
       project_file("identifications_overview_file"),
@@ -5703,23 +5753,15 @@ observeEvent(draft_metadata(), {
     required <- c("Condition", "Replicate", "Precursors", "ProteinGroups")
     validate(need(all(required %in% colnames(data)), "IdentificationsOverview table must contain Condition, Replicate, Precursors, and ProteinGroups columns."))
     data$SourceLabel <- paste(data$Condition, data$Replicate, sep = ".")
-    data$RunLabel <- data$SourceLabel
-    if (!is.null(project_file("meta_file"))) {
-      md <- active_metadata()
-      validate(need(all(c("Condition", "Replicate") %in% colnames(md)), "Metadata must contain Condition and Replicate to label identification plots."))
-      metadata_labels <- md[, c("Condition", "Replicate"), drop = FALSE]
-      metadata_labels$Condition <- as.character(metadata_labels$Condition)
-      metadata_labels$Replicate <- as.character(metadata_labels$Replicate)
-      metadata_labels <- metadata_labels[!duplicated(metadata_labels[, c("Condition", "Replicate")]), , drop = FALSE]
-      metadata_labels$.metadata_match <- TRUE
-      data <- data %>%
-        dplyr::mutate(Condition = as.character(Condition), Replicate = as.character(Replicate)) %>%
-        dplyr::left_join(metadata_labels, by = c("Condition", "Replicate"))
-      matched <- !is.na(data$.metadata_match)
-      preferred_labels <- condition_replicate_label(data$Condition, data$Replicate, data$RunLabel)
-      data$RunLabel[matched] <- preferred_labels[matched]
-      data$.metadata_match <- NULL
+    default_labels <- condition_replicate_label(data$Condition, data$Replicate, data$SourceLabel)
+    md <- tryCatch(active_metadata(), error = function(e) NULL)
+    selected_columns <- input$run_identifications_label_columns
+    data$RunLabel <- if (!is.null(md) && nrow(md) && length(selected_columns)) {
+      identification_metadata_labels(data, md, selected_columns, default_labels)
+    } else {
+      default_labels
     }
+    data$RunLabel <- make.unique(as.character(data$RunLabel), sep = "_")
     data$RunLabel <- factor(data$RunLabel, levels = data$RunLabel)
     data
   })
