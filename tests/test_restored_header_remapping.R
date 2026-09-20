@@ -29,6 +29,14 @@ resolved_saved <- resolve_proteomics_processed_sample_ids(
 )
 stopifnot(identical(unname(resolved_saved), c("run-1", NA_character_)))
 
+resolved_syntactic <- resolve_proteomics_processed_sample_ids(
+  c("old.composite.label.A", "old.composite.label.B"),
+  metadata,
+  metadata$SampleName,
+  saved_map
+)
+stopifnot(identical(unname(resolved_syntactic), c("run-1", "run-2")))
+
 ambiguous_metadata <- rbind(metadata, transform(metadata[1L, , drop = FALSE], Sample = "run-3", SampleName = "Saos2 Nuc SEL & BRT 1-2"))
 ambiguous <- resolve_proteomics_processed_sample_ids(
   "Saos2 Nuc SEL & BRT 1",

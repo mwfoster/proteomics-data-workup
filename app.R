@@ -5554,14 +5554,24 @@ observeEvent(draft_metadata(), {
     value_cols <- match(abundance_columns, colnames(report))
     restored_processed <- any(endsWith(abundance_columns, "_Protein_group_abundance"))
     header_labels <- if (restored_processed) protein_header_labels_from_metadata(md, input$protein_header_label_columns) else as.character(md$Sample)
+    sample_ids <- if (restored_processed) {
+      resolve_proteomics_processed_sample_ids(
+        run_labels,
+        md,
+        header_labels,
+        project_db_cache()$processed_sample_map
+      )
+    } else {
+      run_labels
+    }
     group_values <- as.character(md[[group_col]])
     condition_data <- unique(group_values[!is.na(group_values) & group_values != ""])
     density_rows <- list()
     median_rows <- list()
 
     for (condition in condition_data) {
-      condition_runs <- header_labels[group_values == condition]
-      cols <- value_cols[run_labels %in% condition_runs]
+      condition_samples <- as.character(md$Sample[group_values == condition])
+      cols <- value_cols[sample_ids %in% condition_samples]
       if (length(cols) < 2) next
       values <- as.data.frame(report[, cols, drop = FALSE], stringsAsFactors = FALSE)
       values[] <- lapply(values, function(column) suppressWarnings(as.numeric(as.character(column))))

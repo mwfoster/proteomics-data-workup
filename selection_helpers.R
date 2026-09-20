@@ -179,6 +179,18 @@ resolve_proteomics_processed_sample_ids <- function(run_labels, metadata, curren
   current_match <- match(run_labels, current_header_labels)
   resolved[!is.na(current_match)] <- sample_ids[current_match[!is.na(current_match)]]
 
+  match_syntactic_labels <- function(labels, samples, query) {
+    labels <- make.names(labels, unique = FALSE)
+    query <- make.names(query, unique = FALSE)
+    valid <- !is.na(labels) & nzchar(labels) & !duplicated(labels) & !duplicated(labels, fromLast = TRUE)
+    lookup <- stats::setNames(samples[valid], labels[valid])
+    unname(lookup[query])
+  }
+  missing <- is.na(resolved)
+  if (any(missing)) {
+    resolved[missing] <- match_syntactic_labels(current_header_labels, sample_ids, run_labels[missing])
+  }
+
   if (is.data.frame(saved_sample_map) && all(c("Sample", "HeaderLabel") %in% colnames(saved_sample_map))) {
     saved_labels <- trimws(normalize_proteomics_text(saved_sample_map$HeaderLabel))
     saved_samples <- as.character(saved_sample_map$Sample)
@@ -186,6 +198,10 @@ resolve_proteomics_processed_sample_ids <- function(run_labels, metadata, curren
     saved_lookup <- stats::setNames(saved_samples[valid], saved_labels[valid])
     missing <- is.na(resolved)
     resolved[missing] <- unname(saved_lookup[run_labels[missing]])
+    missing <- is.na(resolved)
+    if (any(missing)) {
+      resolved[missing] <- match_syntactic_labels(saved_labels, saved_samples, run_labels[missing])
+    }
   }
 
   missing <- is.na(resolved)

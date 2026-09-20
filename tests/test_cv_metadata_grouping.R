@@ -17,5 +17,10 @@ stopifnot(identical(
 app_text <- paste(readLines(if (file.exists("app.R")) "app.R" else "../app.R", warn = FALSE), collapse = "\n")
 stopifnot(grepl('selectInput("cv_plot_group_col", "Group CV by metadata field"', app_text, fixed = TRUE))
 stopifnot(grepl('"cv_plot_group_col"', app_text, fixed = TRUE))
+cv_start <- regexpr("cv_from_report <- function", app_text, fixed = TRUE)[1L]
+cv_tail <- substring(app_text, cv_start)
+cv_end <- regexpr("cv_from_batch_corrected_s3 <- function", cv_tail, fixed = TRUE)[1L]
+cv_function_text <- substring(cv_tail, 1L, cv_end - 1L)
+stopifnot(grepl("resolve_proteomics_processed_sample_ids", cv_function_text, fixed = TRUE))
 
 message("CV metadata grouping tests passed.")
