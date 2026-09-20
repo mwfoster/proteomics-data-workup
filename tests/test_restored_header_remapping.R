@@ -45,4 +45,36 @@ ambiguous <- resolve_proteomics_processed_sample_ids(
 )
 stopifnot(is.na(ambiguous))
 
+restored_table <- data.frame(
+  PG.ProteinGroups = "P1",
+  X9_FA_quantified_precursors = 12,
+  X9_FA_Protein_group_abundance = 100,
+  X9_FA_percent_CV = 7,
+  check.names = FALSE
+)
+historical_map <- data.frame(
+  Sample = c("run-1", "run-2"),
+  HeaderLabel = c("X9_FA", "X10_O3"),
+  stringsAsFactors = FALSE
+)
+remapped <- remap_proteomics_processed_headers(
+  restored_table,
+  metadata,
+  current_header_labels = metadata$SampleName,
+  saved_sample_map = historical_map
+)
+stopifnot(identical(
+  colnames(remapped),
+  c(
+    "PG.ProteinGroups",
+    "Saos2 Nuc SEL & BRT 1-2_quantified_precursors",
+    "Saos2 Nuc SEL & BRT 1-2_Protein_group_abundance",
+    "X9_FA_percent_CV"
+  )
+))
+
+app_text <- paste(readLines(if (file.exists("app.R")) "app.R" else "../app.R", warn = FALSE), collapse = "\n")
+stopifnot(grepl("return(remap_restored_protein_headers(source))", app_text, fixed = TRUE))
+stopifnot(length(gregexpr("return(remap_restored_protein_headers(source))", app_text, fixed = TRUE)[[1L]]) == 2L)
+
 cat("Restored header remapping tests passed.\n")

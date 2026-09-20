@@ -224,6 +224,32 @@ resolve_proteomics_processed_sample_ids <- function(run_labels, metadata, curren
   resolved
 }
 
+remap_proteomics_processed_headers <- function(table, metadata, current_header_labels, saved_sample_map = NULL) {
+  table <- as.data.frame(table, stringsAsFactors = FALSE, check.names = FALSE)
+  column_names <- colnames(table)
+  suffix_pattern <- "(_quantified_precursors|_Protein_group_abundance)$"
+  measurement_columns <- grepl(suffix_pattern, column_names)
+  if (!any(measurement_columns)) return(table)
+
+  run_labels <- sub(suffix_pattern, "", column_names[measurement_columns])
+  sample_ids <- resolve_proteomics_processed_sample_ids(
+    run_labels,
+    metadata,
+    current_header_labels,
+    saved_sample_map
+  )
+  metadata_samples <- as.character(metadata$Sample)
+  desired_rows <- match(sample_ids, metadata_samples)
+  desired_labels <- as.character(current_header_labels[desired_rows])
+  usable <- !is.na(desired_labels) & nzchar(trimws(desired_labels))
+  suffixes <- sub(paste0("^.*", suffix_pattern), "\\1", column_names[measurement_columns])
+  replacement <- column_names[measurement_columns]
+  replacement[usable] <- paste0(desired_labels[usable], suffixes[usable])
+  column_names[measurement_columns] <- replacement
+  colnames(table) <- make.unique(column_names)
+  table
+}
+
 stats_comparison_component <- function(value) gsub("[^A-Za-z0-9]+", "_", trimws(normalize_proteomics_text(value)))
 
 make_stats_comparison_id <- function(group_col, numerator, denominator) {

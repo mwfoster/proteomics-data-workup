@@ -2147,6 +2147,31 @@ protein_stats_paused <- reactiveVal(FALSE)
     !is.null(project_file("protein_imputed_file")) || !is.null(project_db_cache()$processed_s3)
   }
 
+  remap_restored_protein_headers <- function(table) {
+    md <- tryCatch(active_metadata(), error = function(e) NULL)
+    if (is.null(md) || !nrow(md) || !"Sample" %in% colnames(md)) return(table)
+    current_labels <- protein_header_labels_from_metadata(md, input$protein_header_label_columns)
+    saved_map <- project_db_cache()$processed_sample_map
+    historical_columns <- unlist(
+      restored_project_settings()$protein_header_label_columns,
+      use.names = FALSE
+    )
+    historical_columns <- historical_columns[historical_columns %in% colnames(md)]
+    if (length(historical_columns)) {
+      historical_map <- data.frame(
+        Sample = as.character(md$Sample),
+        HeaderLabel = protein_header_labels_from_metadata(md, historical_columns),
+        stringsAsFactors = FALSE
+      )
+      saved_map <- if (is.data.frame(saved_map) && all(c("Sample", "HeaderLabel") %in% colnames(saved_map))) {
+        unique(rbind(saved_map[, c("Sample", "HeaderLabel"), drop = FALSE], historical_map))
+      } else {
+        historical_map
+      }
+    }
+    remap_proteomics_processed_headers(table, md, current_labels, saved_map)
+  }
+
   project_number_for_downloads <- function() {
     manual_project_number <- clean_project_number(input$download_project_number)
     if (!is.na(manual_project_number)) return(manual_project_number)
@@ -4544,7 +4569,7 @@ observeEvent(draft_metadata(), {
     source <- protein_source_table("S2")
     revision <- protein_stats_refresh_revision()
     restored_cache <- is.null(project_file("protein_no_impute_file")) && !is.null(cache$processed_s2)
-    if (restored_cache && use_cached_proteomics_table(source, revision)) return(source)
+    if (restored_cache && use_cached_proteomics_table(source, revision)) return(remap_restored_protein_headers(source))
     renamed_protein_table(source, add_stats = "S2" %in% input$stats_tables, selected_non_data = input$s2_non_data_columns)
   })
 
@@ -4642,7 +4667,7 @@ observeEvent(draft_metadata(), {
     restored_cache <- !is.null(project_db_cache()$processed_s3) &&
       ((identical(method, "spectronaut") && is.null(project_file("protein_imputed_file"))) ||
          (identical(method, "knn") && is.null(generated_s3_result()) && is.null(project_file("protein_no_impute_file"))))
-    if (restored_cache && use_cached_proteomics_table(source, revision)) return(source)
+    if (restored_cache && use_cached_proteomics_table(source, revision)) return(remap_restored_protein_headers(source))
     renamed_protein_table(source, add_stats = "S3" %in% input$stats_tables, selected_non_data = input$s3_non_data_columns)
   })
 
