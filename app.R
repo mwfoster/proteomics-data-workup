@@ -43,21 +43,40 @@ condition_replicate_label <- function(condition, replicate, fallback) {
 identification_metadata_labels <- function(overview, metadata, selected_columns, fallback) {
   fallback <- as.character(fallback)
   selected_columns <- intersect(as.character(selected_columns), colnames(metadata))
-  if (!length(selected_columns) || !all(c("Condition", "Replicate") %in% colnames(overview)) ||
-      !all(c("Condition", "Replicate") %in% colnames(metadata))) return(fallback)
+  if (!length(selected_columns)) return(fallback)
 
-  key <- function(data) paste(trimws(as.character(data$Condition)), trimws(as.character(data$Replicate)), sep = "\r")
   metadata_labels <- vapply(seq_len(nrow(metadata)), function(index) {
     parts <- trimws(as.character(metadata[index, selected_columns, drop = TRUE]))
     parts <- parts[!is.na(parts) & nzchar(parts)]
     if (length(parts)) paste(parts, collapse = "_") else ""
   }, character(1))
-  metadata_keys <- key(metadata)
-  keep <- !duplicated(metadata_keys)
-  label_by_key <- stats::setNames(metadata_labels[keep], metadata_keys[keep])
-  labels <- unname(label_by_key[key(overview)])
-  usable <- !is.na(labels) & nzchar(labels)
-  fallback[usable] <- labels[usable]
+
+  run_column <- function(data, candidates) {
+    matched <- candidates[candidates %in% colnames(data)]
+    if (length(matched)) matched[[1L]] else NA_character_
+  }
+  overview_run_column <- run_column(overview, c("FileName", "File Name", "Run Label", "Run.Label", "Sample"))
+  metadata_run_column <- run_column(metadata, c("Sample", "Run Label", "Run.Label", "FileName", "File Name", "File.Name"))
+  matched <- rep(FALSE, nrow(overview))
+  if (!is.na(overview_run_column) && !is.na(metadata_run_column)) {
+    metadata_keys <- trimws(as.character(metadata[[metadata_run_column]]))
+    keep <- !duplicated(metadata_keys)
+    label_by_key <- stats::setNames(metadata_labels[keep], metadata_keys[keep])
+    labels <- unname(label_by_key[trimws(as.character(overview[[overview_run_column]]))])
+    matched <- !is.na(labels) & nzchar(labels)
+    fallback[matched] <- labels[matched]
+  }
+
+  if (any(!matched) && all(c("Condition", "Replicate") %in% colnames(overview)) &&
+      all(c("Condition", "Replicate") %in% colnames(metadata))) {
+    condition_key <- function(data) paste(trimws(as.character(data$Condition)), trimws(as.character(data$Replicate)), sep = "\r")
+    metadata_keys <- condition_key(metadata)
+    keep <- !duplicated(metadata_keys)
+    label_by_key <- stats::setNames(metadata_labels[keep], metadata_keys[keep])
+    labels <- unname(label_by_key[condition_key(overview)])
+    usable <- !matched & !is.na(labels) & nzchar(labels)
+    fallback[usable] <- labels[usable]
+  }
   fallback
 }
 
