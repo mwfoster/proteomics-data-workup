@@ -19,6 +19,7 @@ generic_restore_block <- sub(
 )
 stopifnot(!grepl('"protein_quantity_order_columns"', generic_restore_block, fixed = TRUE))
 stopifnot(!grepl('"stats_group_columns"', generic_restore_block, fixed = TRUE))
+stopifnot(!grepl('"feature_label_by"', generic_restore_block, fixed = TRUE))
 stopifnot(grepl('observeEvent(input$workflow_tabs', app_text, fixed = TRUE))
 stopifnot(grepl('identical(input$workflow_tabs, "Protein tables")', app_text, fixed = TRUE))
 stopifnot(grepl('session$onFlushed(function() {\n      isolate(sync_restored_project_inputs(settings))', app_text, fixed = TRUE))

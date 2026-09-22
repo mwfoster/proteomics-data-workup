@@ -2437,7 +2437,7 @@ protein_stats_paused <- reactiveVal(FALSE)
     update_selectize <- c(
       "s2_non_data_columns", "s3_non_data_columns",
       "cv_plot_conditions", "clustvis_pca_subset_values",
-      "feature_select", "feature_label_by", "script_box_features",
+      "feature_select", "script_box_features",
       "clustvis_pca_opacity_override_groups", "correlation_feature",
       "correlation_groups", "correlation_covariates", "run_identifications_label_columns"
     )
