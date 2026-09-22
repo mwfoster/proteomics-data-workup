@@ -131,6 +131,27 @@ facet_text_scale <- function(columns_per_row) {
   0.7
 }
 
+feature_facet_label_size <- function(requested_size, columns_per_row) {
+  requested_size <- suppressWarnings(as.numeric(requested_size)[1L])
+  if (!is.finite(requested_size) || requested_size <= 0) requested_size <- 11
+  requested_size * facet_text_scale(columns_per_row)
+}
+
+compose_proteomics_metadata_labels <- function(metadata, columns, fallback) {
+  metadata <- normalize_proteomics_metadata(metadata)
+  columns <- intersect(as.character(columns), colnames(metadata))
+  fallback <- as.character(fallback)
+  if (!length(columns)) return(fallback)
+  labels <- vapply(seq_len(nrow(metadata)), function(row_index) {
+    parts <- trimws(as.character(metadata[row_index, columns, drop = TRUE]))
+    parts <- parts[!is.na(parts) & nzchar(parts)]
+    if (length(parts)) paste(parts, collapse = "_") else ""
+  }, character(1))
+  missing <- is.na(labels) | !nzchar(labels)
+  labels[missing] <- fallback[missing]
+  labels
+}
+
 volcano_hits_display_columns <- function(columns, include_fdr) {
   columns <- as.character(columns)
   if (isTRUE(include_fdr)) columns else setdiff(columns, "BH_FDR")

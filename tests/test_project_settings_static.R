@@ -12,7 +12,7 @@ required_patterns <- c(
 )
 required_patterns <- c(
   required_patterns,
-  '"feature_group_by"', '"feature_label_by"',
+  '"feature_group_by"', '"feature_label_by"', '"feature_facet_title_size"',
   '"script_box_features"', '"script_box_label_by"'
 )
 for (pattern in required_patterns) stopifnot(grepl(pattern, text, fixed = TRUE))

@@ -1662,9 +1662,17 @@ ui <- fluidPage(
                 options = proteomics_multiselect_options("For example: Group, Batch, RunOrder", drag = TRUE)
               ),
               selectInput("feature_group_by", "Color/group samples by metadata", choices = c("Condition"), selected = "Condition"),
-              selectInput("feature_label_by", "Label samples by metadata", choices = c("AnalysisLabel"), selected = "AnalysisLabel"),
+              selectizeInput(
+                "feature_label_by",
+                "Label samples by metadata (drag to reorder)",
+                choices = NULL,
+                selected = NULL,
+                multiple = TRUE,
+                options = proteomics_multiselect_options("For example: Subject, Group", drag = TRUE)
+              ),
               textInput("feature_plot_title", "Feature plot title", value = ""),
               numericInput("feature_title_size", "Feature title size", value = 18, min = 8, max = 40, step = 1),
+              numericInput("feature_facet_title_size", "Protein/facet label size", value = 11, min = 4, max = 30, step = 0.5),
               numericInput("feature_bar_width", "Bar width", value = 0.7, min = 0.1, max = 1.0, step = 0.05),
               numericInput("feature_text_size", "Sample label size", value = 3, min = 0.1, step = 0.5),
               radioButtons(
@@ -2299,7 +2307,7 @@ protein_stats_paused <- reactiveVal(FALSE)
       "gsea_gene_col", "gsea_species", "gsea_collection", "gsea_min_size",
       "gsea_max_size", "gsea_top_n", "gsea_plot_width", "gsea_plot_height",
       "feature_data_source", "feature_select", "feature_order_columns", "feature_group_by", "feature_label_by",
-      "feature_plot_title", "feature_title_size", "feature_bar_width",
+      "feature_plot_title", "feature_title_size", "feature_facet_title_size", "feature_bar_width",
       "feature_text_size", "feature_value_scale", "feature_color_mode", "feature_symmetric_scale",
       "feature_group_style", "show_feature_mean", "rotate_feature_labels",
       "feature_interactive", "feature_figure_width", "feature_figure_height", "feature_plot_ncol",
@@ -2378,7 +2386,7 @@ protein_stats_paused <- reactiveVal(FALSE)
       "cv_median_text_size", "cv_line_width", "annotation_rows", "pca_min_observed_percent",
       "max_ncp", "manual_ncp", "point_size", "label_size", "volcano_fc_cutoff",
       "volcano_sig_cutoff", "volcano_max_labels", "volcano_point_size",
-      "volcano_label_size", "feature_title_size", "feature_bar_width",
+      "volcano_label_size", "feature_title_size", "feature_facet_title_size", "feature_bar_width",
       "feature_text_size", "identification_title_size", "identification_axis_text_size",
       "identification_legend_size", "cv_figure_width", "cv_figure_height",
       "pca_figure_width", "pca_figure_height", "volcano_figure_width",
@@ -2418,7 +2426,7 @@ protein_stats_paused <- reactiveVal(FALSE)
     update_select <- c(
         "data_layout", "label_mode", "color_by", "shape_by", "volcano_comparison",
         "volcano_significance_metric", "volcano_label_col", "feature_color_mode",
-        "feature_group_style", "feature_group_by", "feature_label_by", "box_group_by", "box_plot_style", "identification_metric",
+        "feature_group_style", "feature_group_by", "box_group_by", "box_plot_style", "identification_metric",
         "clustvis_pca_color_by", "clustvis_pca_shape_by", "clustvis_pca_label_by", "clustvis_pca_subset_column",
         "pca_loading_rank_by", "gsea_comparison", "gsea_gene_col",
         "correlation_rank_by", "correlation_group_by",
@@ -2429,7 +2437,7 @@ protein_stats_paused <- reactiveVal(FALSE)
     update_selectize <- c(
       "s2_non_data_columns", "s3_non_data_columns",
       "cv_plot_conditions", "clustvis_pca_subset_values",
-      "feature_select", "script_box_features",
+      "feature_select", "feature_label_by", "script_box_features",
       "clustvis_pca_opacity_override_groups", "correlation_feature",
       "correlation_groups", "correlation_covariates", "run_identifications_label_columns"
     )
@@ -5529,10 +5537,23 @@ observeEvent(draft_metadata(), {
     current_group <- isolate(input$feature_group_by)
     selected_group <- retain_metadata_choice(current_group, choices, "Condition")
     updateSelectInput(session, "feature_group_by", choices = c("Select grouping field..." = "", stats::setNames(choices, choices)), selected = selected_group)
-    label_choices <- c("Select label field..." = "", stats::setNames(choices, choices))
-    current_label <- isolate(input$feature_label_by)
-    selected_label <- retain_metadata_choice(current_label, choices, c("AnalysisLabel", "Sample"))
-    updateSelectInput(session, "feature_label_by", choices = label_choices, selected = selected_label)
+    current_labels <- isolate(input$feature_label_by)
+    selected_labels <- current_labels[current_labels %in% choices]
+    saved_labels <- unlist(restored_project_settings()$feature_label_by, use.names = FALSE)
+    saved_labels <- saved_labels[saved_labels %in% choices]
+    if (is.null(current_labels) && length(saved_labels)) selected_labels <- saved_labels
+    if (is.null(current_labels) && !length(selected_labels)) {
+      defaults <- c("AnalysisLabel", "Sample")
+      available_defaults <- defaults[defaults %in% choices]
+      selected_labels <- if (length(available_defaults)) available_defaults[[1L]] else character(0)
+    }
+    updateSelectizeInput(
+      session,
+      "feature_label_by",
+      choices = choices,
+      selected = selected_labels,
+      server = FALSE
+    )
   })
 
   observeEvent(input$protein_no_impute_preview_rows_selected, {
@@ -6486,10 +6507,12 @@ observeEvent(draft_metadata(), {
 
     base <- data.frame(Sample = colnames(expr)[-1], stringsAsFactors = FALSE)
     base <- base %>% left_join(sample_metadata_for_plotting(base$Sample), by = "Sample")
-    label_col <- input$feature_label_by
-    base$DisplayLabel <- if (!is.null(label_col) && label_col %in% colnames(base)) as.character(base[[label_col]]) else as.character(base$Sample)
-    missing_labels <- is.na(base$DisplayLabel) | !nzchar(base$DisplayLabel)
-    base$DisplayLabel[missing_labels] <- as.character(base$Sample[missing_labels])
+    label_columns <- input$feature_label_by
+    base$DisplayLabel <- compose_proteomics_metadata_labels(
+      base,
+      label_columns,
+      fallback = base$Sample
+    )
     group_col <- input$feature_group_by
     base$GroupValue <- if (!is.null(group_col) && group_col %in% colnames(base)) as.character(base[[group_col]]) else "All samples"
     base$GroupValue[is.na(base$GroupValue) | !nzchar(base$GroupValue)] <- "Missing"
@@ -7220,6 +7243,7 @@ observeEvent(draft_metadata(), {
     text_scale <- facet_text_scale(ncol_value)
     scaled_feature_text_size <- max(1.8, input$feature_text_size * text_scale)
     scaled_base_size <- max(8, 13 * text_scale)
+    scaled_facet_title_size <- feature_facet_label_size(input$feature_facet_title_size, ncol_value)
 
     if (has_group && input$feature_group_style == "Colored x labels") {
       label_df <- df %>%
@@ -7257,7 +7281,7 @@ observeEvent(draft_metadata(), {
         plot.title = element_text(size = input$feature_title_size, face = "bold", hjust = 0.5),
         legend.title = element_text(face = "bold"),
         plot.margin = margin(10, 10, 35, 10),
-        strip.text = element_text(face = "bold")
+        strip.text = element_text(face = "bold", size = scaled_facet_title_size)
       )
   })
 
