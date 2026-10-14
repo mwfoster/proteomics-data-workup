@@ -1306,6 +1306,7 @@ ui <- fluidPage(
             multiple = TRUE,
             options = proteomics_multiselect_options("Select groups for %CV columns")
           ),
+          tags$small("Average quantified precursors uses the available counts across included samples; missing counts are omitted and recorded zeros are retained. It appears immediately before %CV columns."),
           tags$small("%CV columns use protein group abundance values and are inserted after the protein annotation columns."),
           radioButtons(
             "protein_derived_column_order",
@@ -1645,6 +1646,11 @@ ui <- fluidPage(
                 multiple = TRUE,
                 options = proteomics_multiselect_options("Type to search; select one or more proteins", drag = TRUE, create = FALSE, maxOptions = 5000)
               ),
+              selectInput(
+                "feature_protein_label", "Protein label in plot",
+                choices = c("Protein name" = "protein_name", "Accession / protein group" = "accession"),
+                selected = "protein_name"
+              ),
               numericInput(
                 "feature_plot_ncol",
                 "Feature plots per row (when multiple selected)",
@@ -1685,6 +1691,7 @@ ui <- fluidPage(
               checkboxInput("feature_symmetric_scale", "Force symmetric color scale around zero", TRUE),
               selectInput("feature_group_style", "Differentiate groups by", choices = c("Outline color", "Colored x labels", "None"), selected = "Outline color"),
               checkboxInput("show_feature_mean", "Show mean line", TRUE),
+              checkboxInput("show_feature_precursors", "Label bars with quantified precursor counts", FALSE),
               checkboxInput("rotate_feature_labels", "Rotate sample labels", TRUE),
               checkboxInput("feature_interactive", "Show interactive/zoomable feature plot", FALSE),
               numericInput("feature_figure_width", "Figure width (inches)", value = 12, min = 2, max = 40, step = 0.5),
@@ -1728,6 +1735,11 @@ ui <- fluidPage(
                 selected = NULL,
                 multiple = TRUE,
                 options = proteomics_multiselect_options("Select one or more proteins", drag = TRUE, create = FALSE, maxOptions = 5000)
+              ),
+              selectInput(
+                "script_box_protein_label", "Protein label in plot",
+                choices = c("Protein name" = "protein_name", "Accession / protein group" = "accession"),
+                selected = "protein_name"
               ),
               numericInput(
                 "script_box_ncol",
@@ -1802,6 +1814,11 @@ ui <- fluidPage(
                 selected = NULL,
                 multiple = FALSE,
                 options = list(placeholder = "Type to search protein / feature", create = FALSE, maxOptions = 5000)
+              ),
+              selectInput(
+                "correlation_protein_label", "Protein labels in plot and results",
+                choices = c("Protein name" = "protein_name", "Accession / protein group" = "accession"),
+                selected = "protein_name"
               ),
               radioButtons(
                 "correlation_value_scale",
@@ -2306,19 +2323,19 @@ protein_stats_paused <- reactiveVal(FALSE)
       "volcano_interactive", "gsea_source", "gsea_comparison", "gsea_rank_metric",
       "gsea_gene_col", "gsea_species", "gsea_collection", "gsea_min_size",
       "gsea_max_size", "gsea_top_n", "gsea_plot_width", "gsea_plot_height",
-      "feature_data_source", "feature_select", "feature_order_columns", "feature_group_by", "feature_label_by",
+      "feature_data_source", "feature_select", "feature_protein_label", "feature_order_columns", "feature_group_by", "feature_label_by",
       "feature_plot_title", "feature_title_size", "feature_facet_title_size", "feature_bar_width",
       "feature_text_size", "feature_value_scale", "feature_color_mode", "feature_symmetric_scale",
-      "feature_group_style", "show_feature_mean", "rotate_feature_labels",
+      "feature_group_style", "show_feature_mean", "show_feature_precursors", "rotate_feature_labels",
       "feature_interactive", "feature_figure_width", "feature_figure_height", "feature_plot_ncol",
       "box_group_by", "box_plot_style", "box_value_scale", "box_plot_title",
       "box_y_axis_title", "box_point_size", "box_text_size",
       "box_figure_width", "box_figure_height",
-      "script_box_source", "script_box_features", "script_box_group_by", "script_box_label_by",
+      "script_box_source", "script_box_features", "script_box_protein_label", "script_box_group_by", "script_box_label_by",
       "script_box_conditions", "script_box_value_scale", "script_box_plot_style", "script_box_title",
       "script_box_y_axis_title", "script_box_point_size", "script_box_point_opacity", "script_box_label_size", "script_box_text_size",
       "script_box_width", "script_box_height", "script_box_ncol",
-      "correlation_source", "correlation_feature", "correlation_value_scale",
+      "correlation_source", "correlation_feature", "correlation_protein_label", "correlation_value_scale",
       "correlation_method", "correlation_group_by", "correlation_groups",
       "correlation_covariates", "correlation_rank_by", "correlation_top_n", "correlation_exclude_reference",
       "correlation_plot_title", "correlation_figure_width", "correlation_figure_height",
@@ -2410,7 +2427,7 @@ protein_stats_paused <- reactiveVal(FALSE)
       "stats_bh_fdr", "scientific_small_values", "enable_protein_filters",
       "cv_fill_density", "auto_detect_annotations", "zscore", "use_estimated_ncp",
       "label_points", "label_missing_points", "append_timestamp", "volcano_interactive", "feature_symmetric_scale",
-      "show_feature_mean", "rotate_feature_labels", "clustvis_pca_scale", "clustvis_pca_ellipses",
+      "show_feature_mean", "show_feature_precursors", "rotate_feature_labels", "clustvis_pca_scale", "clustvis_pca_ellipses",
       "clustvis_pca_no_fill_shapes", "clustvis_pca_interactive", "evosep_fill_manifest_order",
       "correlation_exclude_reference", "feature_interactive"
     )
@@ -2430,7 +2447,8 @@ protein_stats_paused <- reactiveVal(FALSE)
         "clustvis_pca_color_by", "clustvis_pca_shape_by", "clustvis_pca_label_by", "clustvis_pca_subset_column",
         "pca_loading_rank_by", "gsea_comparison", "gsea_gene_col",
         "correlation_rank_by", "correlation_group_by",
-        "script_box_label_by", "batch_correction_batch_col", "batch_correction_group_col",
+        "script_box_label_by", "feature_protein_label", "script_box_protein_label", "correlation_protein_label",
+        "batch_correction_batch_col", "batch_correction_group_col",
         "condition_setup_condition_col", "condition_setup_replicate_order_col", "protein_cv_group_col", "cv_plot_group_col",
         "protein_knn_group_col"
     )
@@ -3570,6 +3588,33 @@ observeEvent(input$save_active_project, {
     labels
   }
 
+  protein_precursor_sample_ids <- function(table, md = active_metadata()) {
+    kind <- proteomics_measurement_kind(colnames(table))
+    columns <- colnames(table)[!is.na(kind) & kind == "precursor"]
+    labels <- sub("^\\[[0-9]+\\][[:space:]]*", "", columns)
+    processed <- endsWith(labels, "_quantified_precursors")
+    labels <- sub("\\.PG\\.NrOfPrecursorsUsedForQuantification$|_quantified_precursors$", "", labels)
+    if (any(processed)) {
+      header_labels <- protein_header_labels_from_metadata(md, input$protein_header_label_columns)
+      labels[processed] <- resolve_proteomics_processed_sample_ids(
+        labels[processed], md, header_labels, project_db_cache()$processed_sample_map
+      )
+    }
+    labels
+  }
+
+  precursor_average_from_source <- function(source, rows = seq_len(nrow(source)), samples = NULL) {
+    if (is.null(samples)) {
+      abundance <- proteomics_abundance_columns(source)
+      samples <- protein_sample_names_for_table(source, abundance)
+      samples <- intersect(samples, as.character(active_metadata()$Sample))
+    }
+    counts <- proteomics_precursor_count_matrix(
+      source, protein_precursor_sample_ids(source), samples, rows = rows
+    )
+    proteomics_mean_precursor_counts(counts)
+  }
+
   expression_data <- reactive({
     df <- raw_data()
 
@@ -4404,7 +4449,8 @@ observeEvent(draft_metadata(), {
     precursor <- !is.na(measurement_kind) & measurement_kind == "precursor"
     abundance <- !is.na(measurement_kind) & measurement_kind == "abundance"
     processed_measurement <- grepl("_quantified_precursors$|_Protein_group_abundance$", names_without_index)
-    derived <- grepl("(_percent_CV|_log2_fold_change|_(paired|unpaired)_t_test_p_value|_BH_FDR)$", names_without_index)
+    derived <- grepl("(_percent_CV|_log2_fold_change|_(paired|unpaired)_t_test_p_value|_BH_FDR)$", names_without_index) |
+      names_without_index == "Average_quantified_precursor_count"
     run_labels <- names_without_index
     run_labels[precursor] <- sub("\\.PG\\.NrOfPrecursorsUsedForQuantification$", "", run_labels[precursor])
     run_labels[precursor] <- sub("_quantified_precursors$", "", run_labels[precursor])
@@ -4555,6 +4601,10 @@ observeEvent(draft_metadata(), {
       list(report[, setdiff(seq_len(ncol(report)), protein_annotation_cols), drop = FALSE])
     )
     report <- do.call(data.frame, c(report_blocks, list(check.names = FALSE)))
+    precursor_ids <- measurement_info$sample_id[measurement_info$measurement_type == "precursor"]
+    included_samples <- unique(measurement_info$sample_id[measurement_info$measurement_type == "abundance"])
+    counts <- proteomics_precursor_count_matrix(report, precursor_ids, included_samples)
+    report <- proteomics_insert_precursor_average(report, proteomics_mean_precursor_counts(counts))
 
     attr(report, "matched_precursor") <- sum(matched & precursor)
     attr(report, "matched_abundance") <- sum(matched & abundance)
@@ -4577,7 +4627,11 @@ observeEvent(draft_metadata(), {
     source <- protein_source_table("S2")
     revision <- protein_stats_refresh_revision()
     restored_cache <- is.null(project_file("protein_no_impute_file")) && !is.null(cache$processed_s2)
-    if (restored_cache && use_cached_proteomics_table(source, revision)) return(remap_restored_protein_headers(source))
+    if (restored_cache && use_cached_proteomics_table(source, revision)) {
+      return(proteomics_insert_precursor_average(
+        remap_restored_protein_headers(source), precursor_average_from_source(source)
+      ))
+    }
     renamed_protein_table(source, add_stats = "S2" %in% input$stats_tables, selected_non_data = input$s2_non_data_columns)
   })
 
@@ -4675,7 +4729,11 @@ observeEvent(draft_metadata(), {
     restored_cache <- !is.null(project_db_cache()$processed_s3) &&
       ((identical(method, "spectronaut") && is.null(project_file("protein_imputed_file"))) ||
          (identical(method, "knn") && is.null(generated_s3_result()) && is.null(project_file("protein_no_impute_file"))))
-    if (restored_cache && use_cached_proteomics_table(source, revision)) return(remap_restored_protein_headers(source))
+    if (restored_cache && use_cached_proteomics_table(source, revision)) {
+      return(proteomics_insert_precursor_average(
+        remap_restored_protein_headers(source), precursor_average_from_source(source)
+      ))
+    }
     renamed_protein_table(source, add_stats = "S3" %in% input$stats_tables, selected_non_data = input$s3_non_data_columns)
   })
 
@@ -4853,6 +4911,18 @@ observeEvent(draft_metadata(), {
       attr(table, "stats_methods") <- attr(log2_stats_table, "stats_methods")
     }
     table <- reorder_batch_corrected_protein_table(table, result$prepared$sample_map)
+    source <- tryCatch(protein_source_table("S3"), error = function(e) NULL)
+    if (!is.null(source)) {
+      source_rows <- result$prepared$kept_row_indices
+      if (is.null(source_rows)) source_rows <- seq_len(nrow(table))
+      counts <- proteomics_precursor_count_matrix(
+        source, protein_precursor_sample_ids(source), result$prepared$sample_map$Sample,
+        rows = source_rows
+      )
+      table <- proteomics_insert_precursor_average(table, proteomics_mean_precursor_counts(counts))
+    } else {
+      table <- proteomics_insert_precursor_average(table, rep(NA_real_, nrow(table)))
+    }
     attr(table, "matched_precursor") <- 0
     attr(table, "matched_abundance") <- ncol(result$expression) - 1
     attr(table, "cv_conditions") <- character(0)
@@ -6540,6 +6610,27 @@ observeEvent(draft_metadata(), {
     base$.BarID <- factor(base$Sample, levels = unique(base$Sample))
     display_levels <- unique(as.character(base$DisplayLabel))
 
+    precursor_counts <- NULL
+    if (isTRUE(input$show_feature_precursors)) {
+      source_name <- if (identical(input$feature_data_source, "S3_batch_corrected")) "S3" else input$feature_data_source
+      source <- tryCatch(protein_source_table(source_name), error = function(e) NULL)
+      if (!is.null(source)) {
+        info <- protein_info_for_source(input$feature_data_source, input$report_feature_col)
+        selected_rows <- match(features, as.character(info$Protein))
+        source_rows <- if (identical(input$feature_data_source, "S3_batch_corrected")) {
+          corrected_rows <- batch_corrected_s3_result()$prepared$kept_row_indices
+          if (is.null(corrected_rows)) corrected_rows <- seq_len(nrow(info))
+          corrected_rows[selected_rows]
+        } else {
+          info$SourceRowIndex[selected_rows]
+        }
+        precursor_counts <- proteomics_precursor_count_matrix(
+          source, protein_precursor_sample_ids(source), base$Sample, rows = source_rows
+        )
+        rownames(precursor_counts) <- features
+      }
+    }
+
     rows <- lapply(features, function(feature) {
       row <- expr[expr$Feature == feature, , drop = FALSE]
       vals <- suppressWarnings(as.numeric(row[1, -1, drop = TRUE]))
@@ -6547,6 +6638,8 @@ observeEvent(draft_metadata(), {
       out <- base
       out$Feature <- feature
       out$Value <- unname(vals[out$Sample])
+      out$PrecursorCount <- if (is.null(precursor_counts)) NA_real_ else
+        unname(precursor_counts[feature, out$Sample])
       out <- out[!is.na(out$Value), , drop = FALSE]
       if (!nrow(out)) return(out)
       out$RawValue <- if (source_is_log2) {
@@ -6789,7 +6882,12 @@ observeEvent(draft_metadata(), {
     scaled_text_size <- max(8, input$script_box_text_size * text_scale)
     scaled_label_size <- max(1.8, input$script_box_label_size * text_scale)
     selected_features <- unique(as.character(df$Feature))
-    title_text <- if (nzchar(input$script_box_title)) input$script_box_title else if (length(selected_features) == 1L) selected_features else "Selected protein groups"
+    display <- protein_plot_display(
+      protein_info_for_source(input$script_box_source, input$report_feature_col),
+      selected_features, input$script_box_protein_label,
+      input$script_box_title, "Selected protein groups"
+    )
+    title_text <- display$title
     y_title <- if (nzchar(input$script_box_y_axis_title)) {
       input$script_box_y_axis_title
     } else if (identical(input$script_box_value_scale, "log2")) {
@@ -6841,7 +6939,8 @@ observeEvent(draft_metadata(), {
         alpha = input$script_box_point_opacity
       ) +
       scale_fill_manual(values = condition_colors, drop = FALSE) +
-      facet_wrap(~Feature, scales = "free_y", ncol = script_box_ncol_value) +
+      facet_wrap(~Feature, scales = "free_y", ncol = script_box_ncol_value,
+                 labeller = ggplot2::as_labeller(display$labels)) +
       labs(title = title_text, y = y_title, x = input$script_box_group_by, fill = NULL) +
       theme_classic(base_size = scaled_text_size) +
       theme(
@@ -7095,8 +7194,16 @@ observeEvent(draft_metadata(), {
     out
   })
 
-  correlation_lollipop_data <- reactive({
+  correlation_display_results <- reactive({
     data <- correlation_results_data()
+    data$DisplayProtein <- unname(protein_plot_labels(
+      data, data$Protein, input$correlation_protein_label
+    ))
+    data
+  })
+
+  correlation_lollipop_data <- reactive({
+    data <- correlation_display_results()
     data <- data[is.finite(data$Beta) & is.finite(data$R2), , drop = FALSE]
     validate(need(nrow(data) > 0, "No valid regression results are available for plotting."))
 
@@ -7121,7 +7228,11 @@ observeEvent(draft_metadata(), {
   correlation_lollipop_plot_obj <- reactive({
     data <- correlation_lollipop_data()
     title_text <- if (nzchar(input$correlation_plot_title)) input$correlation_plot_title else "Top Protein Correlations"
-    subtitle_text <- paste0("Reference: ", input$correlation_feature)
+    reference_label <- protein_plot_labels(
+      protein_info_for_source(input$correlation_source, input$report_feature_col),
+      input$correlation_feature, input$correlation_protein_label
+    )
+    subtitle_text <- paste0("Reference: ", unname(reference_label[[1L]]))
     x_title <- if (identical(input$correlation_value_scale, "log2")) {
       "Beta coefficient (log2 abundance)"
     } else {
@@ -7151,13 +7262,12 @@ observeEvent(draft_metadata(), {
     has_group <- "GroupValue" %in% colnames(df)
     selected_features <- levels(df$Feature)
     if (is.null(selected_features) || !length(selected_features)) selected_features <- unique(as.character(df$Feature))
-    title_text <- if (nzchar(input$feature_plot_title)) {
-      input$feature_plot_title
-    } else if (length(selected_features) == 1L) {
-      selected_features
-    } else {
-      "Selected proteins"
-    }
+    display <- protein_plot_display(
+      protein_info_for_source(input$feature_data_source, input$report_feature_col),
+      selected_features, input$feature_protein_label,
+      input$feature_plot_title, "Selected proteins"
+    )
+    title_text <- display$title
 
     fill_var <- switch(
       input$feature_color_mode,
@@ -7171,7 +7281,8 @@ observeEvent(draft_metadata(), {
     batch_text <- if ("Batch" %in% colnames(df)) as.character(df$Batch) else "Not available"
     condition_text <- if ("Condition" %in% colnames(df)) as.character(df$Condition) else "Not available"
     df$.FeatureHover <- paste0(
-      "Protein: ", as.character(df$Feature),
+      "Protein: ", unname(display$labels[as.character(df$Feature)]),
+      "<br>Feature ID: ", as.character(df$Feature),
       "<br>Sample: ", as.character(df$Sample),
       "<br>Label: ", as.character(df$DisplayLabel),
       "<br>Value: ", signif(df$PlotValue, 5),
@@ -7179,6 +7290,10 @@ observeEvent(draft_metadata(), {
       "<br>Condition: ", condition_text,
       "<br>Batch: ", batch_text
     )
+    if (isTRUE(input$show_feature_precursors)) {
+      count_text <- ifelse(is.finite(df$PrecursorCount), as.character(df$PrecursorCount), "Unavailable")
+      df$.FeatureHover <- paste0(df$.FeatureHover, "<br>Quantified precursors: ", count_text)
+    }
 
     p <- ggplot(df, aes(x = .BarID, y = PlotValue, group = .plot_order, text = .FeatureHover))
     bar_labels <- stats::setNames(as.character(df$DisplayLabel), as.character(df$.BarID))
@@ -7199,6 +7314,17 @@ observeEvent(draft_metadata(), {
       p <- p +
         geom_hline(data = mean_df, aes(yintercept = MeanValue), linetype = "dashed", inherit.aes = FALSE) +
         geom_text(data = mean_df, aes(x = -Inf, y = MeanValue, label = "Mean"), hjust = -0.1, vjust = -0.4, size = 3.5, inherit.aes = FALSE)
+    }
+
+    if (isTRUE(input$show_feature_precursors)) {
+      count_df <- df[is.finite(df$PrecursorCount), , drop = FALSE]
+      if (nrow(count_df)) {
+        p <- p + geom_text(
+          data = count_df,
+          aes(x = .BarID, y = PlotValue, label = PrecursorCount),
+          inherit.aes = FALSE, vjust = -0.4, size = 3, check_overlap = TRUE
+        ) + scale_y_continuous(expand = expansion(mult = c(0.05, 0.14)))
+      }
     }
 
     if (input$feature_color_mode %in% c("Z-score", "Centered value")) {
@@ -7266,7 +7392,8 @@ observeEvent(draft_metadata(), {
         coord_cartesian(clip = "off")
     }
 
-    p + facet_wrap(~Feature, scales = "free_y", ncol = ncol_value) +
+    p + facet_wrap(~Feature, scales = "free_y", ncol = ncol_value,
+                   labeller = ggplot2::as_labeller(display$labels)) +
       theme_bw(base_size = scaled_base_size) +
       labs(title = title_text, x = "", y = y_axis_title) +
       theme(
@@ -7313,6 +7440,7 @@ observeEvent(draft_metadata(), {
       ),
       scale_note,
       order_note,
+      if (isTRUE(input$show_feature_precursors)) " Bar labels show available quantified precursor counts from the source report." else "",
       interactive_note,
       " Select a row in a protein table or the log2 abundance matrix to open that protein here."
     )
@@ -8090,7 +8218,7 @@ observeEvent(draft_metadata(), {
     })
 
     output$correlation_results_table <- renderDT({
-      data <- correlation_results_data()
+      data <- correlation_display_results()
       preferred <- intersect(
         c("Protein", "DisplayProtein", "Method", "Beta", "R2", "PValue", "QValue", "Correlation", "N",
           "GroupFilter", "Covariates",
@@ -8319,7 +8447,8 @@ observeEvent(draft_metadata(), {
         openxlsx::freezePane(workbook, sheet = sheet_name, firstRow = TRUE)
         openxlsx::setRowHeights(workbook, sheet = sheet_name, rows = 1, heights = 42)
 
-        derived_cols <- which(grepl("(_percent_CV|_log2_fold_change|_(paired|unpaired)_t_test_p_value|_BH_FDR)$", colnames(table_data)))
+        derived_cols <- which(grepl("(_percent_CV|_log2_fold_change|_(paired|unpaired)_t_test_p_value|_BH_FDR)$", colnames(table_data)) |
+          colnames(table_data) == "Average_quantified_precursor_count")
         abundance_cols <- which(grepl("_Protein_group_abundance$", colnames(table_data)))
         digits <- max(1, as.integer(input$numeric_sig_figs))
         threshold <- suppressWarnings(as.numeric(input$scientific_threshold))
@@ -8567,7 +8696,7 @@ observeEvent(draft_metadata(), {
     content = function(file) {
       feature <- if (is.null(input$correlation_feature)) "reference" else input$correlation_feature
       out_name <- build_export_filename(paste0(gsub("[^A-Za-z0-9_\\-]", "_", feature), "_correlation_results.csv"))
-      write.csv(correlation_results_data(), file, row.names = FALSE, na = "NaN")
+      write.csv(correlation_display_results(), file, row.names = FALSE, na = "NaN")
       save_download_copy(file, out_name)
     }
   )

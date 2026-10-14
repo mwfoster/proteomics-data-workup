@@ -74,7 +74,7 @@ stopifnot(identical(
 ))
 
 app_text <- paste(readLines(if (file.exists("app.R")) "app.R" else "../app.R", warn = FALSE), collapse = "\n")
-stopifnot(grepl("return(remap_restored_protein_headers(source))", app_text, fixed = TRUE))
-stopifnot(length(gregexpr("return(remap_restored_protein_headers(source))", app_text, fixed = TRUE)[[1L]]) == 2L)
+stopifnot(length(gregexpr("remap_restored_protein_headers(source)", app_text, fixed = TRUE)[[1L]]) == 2L)
+stopifnot(length(gregexpr("precursor_average_from_source(source)", app_text, fixed = TRUE)[[1L]]) == 2L)
 
 cat("Restored header remapping tests passed.\n")

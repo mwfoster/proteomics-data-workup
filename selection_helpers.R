@@ -36,6 +36,43 @@ build_multifeature_boxplot_data <- function(expression, selected_features) {
   do.call(rbind, rows)
 }
 
+protein_plot_labels <- function(info, features, label_by = "protein_name") {
+  features <- as.character(features)
+  if (!length(features)) return(stats::setNames(character(0), character(0)))
+  if (is.null(info) || !"Protein" %in% colnames(info)) {
+    return(stats::setNames(features, features))
+  }
+  info <- as.data.frame(info, stringsAsFactors = FALSE, check.names = FALSE)
+  rows <- match(features, as.character(info$Protein))
+  preferred <- if (identical(label_by, "accession")) {
+    c("PG.ProteinGroups", "PG.ProteinNames")
+  } else {
+    c("PG.ProteinNames", "PG.ProteinGroups")
+  }
+  labels <- rep(NA_character_, length(features))
+  for (column in intersect(preferred, colnames(info))) {
+    values <- trimws(as.character(info[[column]][rows]))
+    use <- (is.na(labels) | !nzchar(labels)) & !is.na(values) & nzchar(values)
+    labels[use] <- values[use]
+  }
+  missing <- is.na(labels) | !nzchar(labels)
+  labels[missing] <- features[missing]
+  stats::setNames(make.unique(labels), features)
+}
+
+protein_plot_display <- function(info, features, label_by = "protein_name", custom_title = "", multi_title = "Selected proteins") {
+  labels <- protein_plot_labels(info, features, label_by)
+  custom_title <- as.character(custom_title)[1L]
+  title <- if (!is.na(custom_title) && nzchar(custom_title)) {
+    custom_title
+  } else if (length(labels) == 1L) {
+    unname(labels[[1L]])
+  } else {
+    multi_title
+  }
+  list(labels = labels, title = title)
+}
+
 deduplicate_feature_samples <- function(data) {
   if (is.null(data) || !nrow(data)) return(data)
   required <- c("Feature", "Sample")

@@ -103,6 +103,49 @@ proteomics_measurement_kind <- function(columns) {
   ifelse(precursor, "precursor", ifelse(abundance, "abundance", NA_character_))
 }
 
+proteomics_precursor_count_matrix <- function(table, precursor_sample_ids, samples, rows = seq_len(nrow(table))) {
+  kind <- proteomics_measurement_kind(names(table))
+  columns <- names(table)[!is.na(kind) & kind == "precursor"]
+  if (length(precursor_sample_ids) != length(columns)) stop("Precursor sample mapping does not match precursor columns.", call. = FALSE)
+  samples <- as.character(samples)
+  out <- matrix(NA_real_, nrow = length(rows), ncol = length(samples),
+                dimnames = list(NULL, samples))
+  for (index in seq_along(samples)) {
+    source <- which(!is.na(precursor_sample_ids) & precursor_sample_ids == samples[index])
+    if (length(source) > 1L) stop("Multiple precursor columns map to one sample.", call. = FALSE)
+    if (length(source) == 1L) {
+      out[, index] <- suppressWarnings(as.numeric(as.character(table[[columns[source]]][rows])))
+    }
+  }
+  out
+}
+
+proteomics_mean_precursor_counts <- function(counts) {
+  if (!ncol(counts)) return(rep(NA_real_, nrow(counts)))
+  means <- rowMeans(counts, na.rm = TRUE)
+  means[!is.finite(means)] <- NA_real_
+  unname(means)
+}
+
+proteomics_insert_precursor_average <- function(table, averages) {
+  if (length(averages) != nrow(table)) stop("Precursor averages must match protein rows.", call. = FALSE)
+  column <- "Average_quantified_precursor_count"
+  table[[column]] <- as.numeric(averages)
+  remaining <- setdiff(names(table), column)
+  derived <- grep("(_percent_CV|_log2_fold_change|_(paired|unpaired)_t_test_p_value|_BH_FDR)$", remaining)
+  measurement <- which(!is.na(proteomics_measurement_kind(remaining)))
+  before <- if (length(grep("_percent_CV$", remaining))) {
+    min(grep("_percent_CV$", remaining))
+  } else if (length(derived)) {
+    min(derived)
+  } else if (length(measurement)) {
+    min(measurement)
+  } else {
+    length(remaining) + 1L
+  }
+  table[, append(remaining, column, after = before - 1L), drop = FALSE]
+}
+
 order_proteomics_measurement_columns <- function(columns, sample_rank = seq_along(columns)) {
   kind <- proteomics_measurement_kind(columns)
   sample_rank <- suppressWarnings(as.numeric(sample_rank))
@@ -113,7 +156,8 @@ order_proteomics_measurement_columns <- function(columns, sample_rank = seq_alon
 proteomics_annotation_columns <- function(columns) {
   columns <- as.character(columns)
   measurement <- !is.na(proteomics_measurement_kind(columns))
-  derived <- grepl("(_percent_CV|_log2_fold_change|_(paired|unpaired)_t_test_p_value|_BH_FDR)$", columns)
+  derived <- grepl("(_percent_CV|_log2_fold_change|_(paired|unpaired)_t_test_p_value|_BH_FDR)$", columns) |
+    columns == "Average_quantified_precursor_count"
   columns[!(measurement | derived)]
 }
 
